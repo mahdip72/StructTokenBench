@@ -375,26 +375,29 @@ class SequenceClassificationModel(ProceedingBaseModel):
             else:
                 raise ValueError("No continuous features provided and no tokens_embed available to embed input_ids.")
 
-        # ensure targets are long class indices
+        # ensure targets are long class indices for global tasks; local will handle float later
         targets = targets.long()
 
-        # try to discover number of classes from common attributes on *this* module
-        num_labels = getattr(self, "num_labels", None)
-        if num_labels is None and hasattr(self, "classifier"):
-            num_labels = getattr(self.classifier, "out_features", None)
-        if num_labels is None and hasattr(self, "head"):
-            num_labels = getattr(self.head, "out_features", None)
+        # Only enforce label range for GLOBAL multi-class classification.
+        if self.is_global_or_local == "global":
+            # try to discover number of classes from common attributes on *this* module
+            num_labels = getattr(self, "num_labels", None)
+            if num_labels is None and hasattr(self, "classifier"):
+                num_labels = getattr(self.classifier, "out_features", None)
+            if num_labels is None and hasattr(self, "head"):
+                num_labels = getattr(self.head, "out_features", None)
 
-        # if we discovered it, enforce label range to avoid CUDA asserts
-        if num_labels is not None:
-            bad_lo = (targets < 0).nonzero(as_tuple=False).flatten()
-            bad_hi = (targets >= num_labels).nonzero(as_tuple=False).flatten()
-            if bad_lo.numel() or bad_hi.numel():
-                raise ValueError(
-                    f"[LabelRangeError] {bad_lo.numel()} labels < 0 and "
-                    f"{bad_hi.numel()} labels >= num_labels ({num_labels}). "
-                    f"min={int(targets.min())}, max={int(targets.max())}"
-                )
+            # if we discovered it, enforce label range to avoid CUDA asserts
+            if num_labels is not None:
+                # ignore masked positions (-100)
+                valid = targets >= 0
+                if valid.any():
+                    bad_hi = (targets[valid] >= num_labels).nonzero(as_tuple=False).flatten()
+                    if bad_hi.numel():
+                        raise ValueError(
+                            f"[LabelRangeError] {bad_hi.numel()} labels >= num_labels ({num_labels}). "
+                            f"min={int(targets[valid].min())}, max={int(targets[valid].max())}"
+                        )
 
         if self.is_global_or_local == "global":
             assert not self.regression
@@ -506,8 +509,12 @@ class ZeroshotProximityModel(ProceedingBaseModel):
 
         self.d_model = d_model
 
-        if codebook_embedding is not None:
-            # for discretized tokenizers
+        if (
+            isinstance(codebook_embedding, torch.Tensor)
+            and codebook_embedding.ndim == 2
+            and codebook_embedding.numel() > 0
+        ):
+            # for discretized tokenizers with a valid codebook
             self.codebook_embedding = codebook_embedding.detach().cpu()
             embed = self.codebook_embedding
             embed = F.normalize(embed, p=2, dim=-1)
@@ -520,7 +527,7 @@ class ZeroshotProximityModel(ProceedingBaseModel):
             self.alphabet = Alphabet(list(range(real_num_tokens)))
             self.substitution_matrix = SubstitutionMatrix(self.alphabet, self.alphabet, sim_score)
         else:
-            # for continuous tokenizers
+            # for continuous tokenizers or missing/empty codebook
             self.codebook_embedding = None
 
     def forward(self, input_list, targets=None):
@@ -648,27 +655,35 @@ class PlModel(pl.LightningModule):
         self.model = model_init_fn(self.trainer, self.model_cfg,
                                    codebook_embedding=self.codebook_embedding)
 
-        # If the buffer is empty, try to get the codebook from the tokenizer
+        # If the buffer is empty, try to get the codebook from the tokenizer (if discrete);
+        # otherwise allow empty for continuous tokenizers.
         import torch, time
         needs_fill = (not isinstance(self.codebook_embedding, torch.Tensor)) or (self.codebook_embedding.numel() == 0)
         if needs_fill:
             dm = self.trainer.datamodule
-            tok = getattr(dm, "tokenizer", None)
-            if tok is not None and getattr(tok, "codebook", None) is not None:
-                cb = tok.codebook.detach().float()
-                # assign to the already-registered buffer (no re-registration!)
-                self.codebook_embedding = cb
+            tok = getattr(dm, "tokenizer", None) or getattr(dm, "get_tokenizer", lambda: None)()
+
+            # Try to decide if tokenizer is continuous (no discrete vocab)
+            is_continuous_tok = False
+            try:
+                get_nt = getattr(tok, "get_num_tokens", None)
+                if callable(get_nt):
+                    is_continuous_tok = (get_nt() is None)
+            except Exception:
+                pass
+
+            cb = getattr(tok, "codebook", None)
+            if isinstance(cb, torch.Tensor) and cb.numel() > 0:
+                # assign to already-registered buffer
+                self.codebook_embedding = cb.detach().float()
+            elif is_continuous_tok or cb is None or (isinstance(cb, torch.Tensor) and cb.numel() == 0):
+                # Continuous path: no codebook required
+                self.codebook_embedding = torch.tensor([])
             else:
-                # Check if this is a continuous tokenizer (no discrete codebook needed)
-                is_continuous = getattr(dm, "get_tokenizer", lambda: None)()
-                if is_continuous is not None and not hasattr(is_continuous, "codebook"):
-                    # Continuous tokenizer (e.g., H5 features) - no codebook needed
-                    self.codebook_embedding = torch.tensor([])  # empty placeholder
-                else:
-                    raise RuntimeError(
-                        "codebook_embedding is empty. Datamodule must expose `tokenizer.codebook` "
-                        "(e.g., from '/codebook' in the H5)."
-                    )
+                raise RuntimeError(
+                    "codebook_embedding is empty. Datamodule must expose `tokenizer.codebook` "
+                    "(e.g., from '/codebook' in the H5)."
+                )
 
         # timing, etc.
         self._last_logged_batch_start_time = time.monotonic()

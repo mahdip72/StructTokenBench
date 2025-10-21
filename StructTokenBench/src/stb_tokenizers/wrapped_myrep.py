@@ -162,6 +162,9 @@ class WrappedMyRepTokenizer:
             codebook_in_h5: bool = True,
             codebook_dataset: str = "/codebook",
             indices_dataset: str = "/indices",
+            # optional location for continuous features inside H5 (group name)
+            features_dataset: str | None = None,
+            embeddings_dataset: str | None = None,
     ):
         import os
         import h5py, torch
@@ -201,6 +204,8 @@ class WrappedMyRepTokenizer:
         self.codebook_in_h5 = bool(codebook_in_h5)
         self.codebook_dataset = (codebook_dataset or "/codebook")
         self.indices_dataset = (indices_dataset or "/indices")
+        # allow either name; "embeddings_dataset" kept for compatibility with CLI flags
+        self.features_dataset = (features_dataset or embeddings_dataset)
         self.codebook = None
 
         # 4) Load codebook from external file if provided
@@ -350,8 +355,20 @@ class WrappedMyRepTokenizer:
                 seqs = None if not use_sequence else ["X"] * L
                 return tok, residue_index, seqs
 
-            # 2) continuous (L,d) -> quantize using self.codebook
+            # 2) continuous (L,d) -> quantize using self.codebook OR return raw if allowed
             if a.ndim == 2 and np.issubdtype(a.dtype, np.floating):
+                # If user requests continuous usage, bypass quantization entirely
+                if getattr(self, "quantize_continuous", True) is False:
+                    feats = torch.as_tensor(a, dtype=torch.float32)
+                    L = int(feats.shape[0])
+                    # align residue index to mmCIF author numbering when possible
+                    try:
+                        residue_index = self._make_residue_index(pdb_path, chain_up or "", L)
+                    except Exception:
+                        residue_index = np.arange(L, dtype=np.int32)
+                    seqs = None if not use_sequence else ["X"] * L
+                    return feats, residue_index, seqs
+
                 if self.codebook is None:
                     raise MissingRepresentation(
                         f"Utilization expects discrete token indices, but H5 has float features {a.shape} "
@@ -367,6 +384,26 @@ class WrappedMyRepTokenizer:
 
             raise MissingRepresentation(f"Unsupported array: shape={a.shape}, dtype={a.dtype}")
 
+        # 0) If a features dataset group is provided, try it first for float features
+        feat_ds = (self.features_dataset or "").lstrip("/")
+        if feat_ds and feat_ds in h5:
+            cands = []
+            if chain_up:
+                cands += [
+                    f"{feat_ds}/{pdb_id}_chain_id_{chain_up}",
+                    f"{feat_ds}/{pdb_id}_chain_id_{chain_up.lower()}",
+                ]
+            cands += [f"{feat_ds}/{pdb_id}"]
+            for k in cands:
+                key = k.lstrip("/")
+                if key in h5:
+                    try:
+                        import h5py
+                        if isinstance(h5[key], h5py.Dataset):
+                            return _as_triplet(h5[key][()])
+                    except Exception:
+                        pass
+
         idx_ds = self.indices_dataset.lstrip("/")
         if idx_ds in h5:
             cands = []
@@ -375,30 +412,85 @@ class WrappedMyRepTokenizer:
                     f"{idx_ds}/{pdb_id}_chain_id_{chain_up}",
                     f"{idx_ds}/{pdb_id}_chain_id_{chain_up.lower()}",
                 ]
-            cands += [f"{idx_ds}/{pdb_id}", idx_ds]  # bare pdb, or a flat /indices
+            cands += [f"{idx_ds}/{pdb_id}"]  # bare pdb under the group
             for k in cands:
                 key = k.lstrip("/")
                 if key in h5:
-                    return _as_triplet(h5[key][()])
+                    try:
+                        import h5py
+                        if isinstance(h5[key], h5py.Dataset):
+                            return _as_triplet(h5[key][()])
+                    except Exception:
+                        pass
 
         tried = []
         # 1) exact chain key
         if chain_up:
+            import h5py, numpy as np, torch
             k_exact = f"{pdb_id}_chain_id_{chain_up}"
             tried.append(k_exact)
             if k_exact in h5:
-                return _as_triplet(h5[k_exact][()])
+                obj = h5[k_exact]
+                if isinstance(obj, h5py.Dataset):
+                    return _as_triplet(obj[()])
+                if isinstance(obj, h5py.Group):
+                    # try features dataset name inside the group
+                    ds_name = (self.features_dataset or "").lstrip("/")
+                    if ds_name and ds_name in obj and isinstance(obj[ds_name], h5py.Dataset):
+                        return _as_triplet(obj[ds_name][()])
+                    # otherwise pick the first usable dataset inside the group
+                    for sub in obj.keys():
+                        if isinstance(obj[sub], h5py.Dataset):
+                            arr = obj[sub][()]
+                            # prefer continuous if allowed
+                            if arr.ndim == 2 or arr.ndim == 1:
+                                return _as_triplet(arr)
 
             # also try lowercase chain (sometimes stored that way)
             k_low = f"{pdb_id}_chain_id_{chain_up.lower()}"
             tried.append(k_low)
             if k_low in h5:
-                return _as_triplet(h5[k_low][()])
+                obj = h5[k_low]
+                if isinstance(obj, h5py.Dataset):
+                    return _as_triplet(obj[()])
+                if isinstance(obj, h5py.Group):
+                    ds_name = (self.features_dataset or "").lstrip("/")
+                    if ds_name and ds_name in obj and isinstance(obj[ds_name], h5py.Dataset):
+                        return _as_triplet(obj[ds_name][()])
+                    for sub in obj.keys():
+                        if isinstance(obj[sub], h5py.Dataset):
+                            arr = obj[sub][()]
+                            if arr.ndim == 2 or arr.ndim == 1:
+                                return _as_triplet(arr)
 
-        # 2) bare PDB
+        # 2) bare PDB (only if it is a dataset; skip if it's a group)
         tried.append(pdb_id)
         if pdb_id in h5:
             import h5py, numpy as np, torch
+
+            # If top-level object for this PDB is a dataset, read it as-is
+            try:
+                obj0 = h5[pdb_id]
+                if isinstance(obj0, h5py.Dataset):
+                    return _as_triplet(obj0[()])
+                # If it's a group (apolo-lite layout: <pdb>/embedding, <pdb>/indices)
+                if isinstance(obj0, h5py.Group):
+                    # 1) Try explicitly requested dataset name
+                    ds_name = (self.features_dataset or "").lstrip("/")
+                    if ds_name and ds_name in obj0 and isinstance(obj0[ds_name], h5py.Dataset):
+                        return _as_triplet(obj0[ds_name][()])
+                    # 2) Prefer common embedding names
+                    for cand in ("embedding", "embeddings", "features"):
+                        if cand in obj0 and isinstance(obj0[cand], h5py.Dataset):
+                            return _as_triplet(obj0[cand][()])
+                    # 3) Fallback: first dataset child
+                    for sub in obj0.keys():
+                        if isinstance(obj0[sub], h5py.Dataset):
+                            arr = obj0[sub][()]
+                            if arr.ndim == 2 or arr.ndim == 1:
+                                return _as_triplet(arr)
+            except Exception:
+                pass
 
             idx_ds = self.indices_dataset.lstrip("/")  # "/indices" -> "indices"
             obj = h5.get(idx_ds, None)
@@ -418,28 +510,46 @@ class WrappedMyRepTokenizer:
                     key = k.lstrip("/")
                     tried_idx.append("/" + key)
                     if key in h5:
-                        arr = h5[key][()]  # expect 1D int indices
-                        if arr.ndim == 1:
-                            tok = torch.as_tensor(arr, dtype=torch.long)
-                            L = int(tok.numel())
-                            residue_index = np.arange(L, dtype=np.int32)
-                            seqs = None if not use_sequence else ["X"] * L
-                            return tok, residue_index, seqs
+                        try:
+                            if isinstance(h5[key], h5py.Dataset):
+                                arr = h5[key][()]  # expect 1D int indices
+                                if arr.ndim == 1:
+                                    tok = torch.as_tensor(arr, dtype=torch.long)
+                                    L = int(tok.numel())
+                                    residue_index = np.arange(L, dtype=np.int32)
+                                    seqs = None if not use_sequence else ["X"] * L
+                                    return tok, residue_index, seqs
+                        except Exception:
+                            pass
                 # Optional debug:
-                print(f"[MyRep] /{idx_ds} exists, but none of {tried_idx} found. Subkeys: {list(h5[idx_ds].keys())[:20]}")
-            return _as_triplet(h5[pdb_id][()])
+                try:
+                    print(f"[MyRep] /{idx_ds} exists, but none of {tried_idx} found. Subkeys: {list(h5[idx_ds].keys())[:20]}")
+                except Exception:
+                    pass
 
         # 3) fallback to first available chain for this pdb
         prefix = f"{pdb_id}_chain_id_"
         avail = sorted([k for k in h5.keys() if k.startswith(prefix)])
         if avail and self.fallback_to_any_chain:
+            import h5py
             chosen = avail[0]
             if (pdb_id, chain_up) not in self._warned:
                 preview = ", ".join(avail[:6]) + ("..." if len(avail) > 6 else "")
                 print(f"[MyRep] WARNING: requested {pdb_id} chain '{chain_up}' not in H5; "
                       f"falling back to '{chosen}'. Available: [{preview}]")
                 self._warned.add((pdb_id, chain_up))
-            return _as_triplet(h5[chosen][()])
+            obj = h5[chosen]
+            if isinstance(obj, h5py.Dataset):
+                return _as_triplet(obj[()])
+            if isinstance(obj, h5py.Group):
+                ds_name = (self.features_dataset or "").lstrip("/")
+                if ds_name and ds_name in obj and isinstance(obj[ds_name], h5py.Dataset):
+                    return _as_triplet(obj[ds_name][()])
+                for sub in obj.keys():
+                    if isinstance(obj[sub], h5py.Dataset):
+                        arr = obj[sub][()]
+                        if arr.ndim == 2 or arr.ndim == 1:
+                            return _as_triplet(arr)
 
         # 4) no match → helpful error
         candidates = [k for k in h5.keys() if k == pdb_id or k.startswith(prefix)]
