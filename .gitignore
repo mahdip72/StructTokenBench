@@ -23,3 +23,5 @@ struct_token_bench_logs/
 ../struct_token_bench_release_data/data/functional/local/**/out_ps/
 *.pkl
 *.ckpt
+pdb_data/mmcif_files/mmcif_files/
+pdb_data/mmcif_files/obsolete.dat
