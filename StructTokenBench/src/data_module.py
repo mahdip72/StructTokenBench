@@ -109,7 +109,15 @@ def load_class(qualname: str):
     """Resolve both fully-qualified and bare class names."""
     if "." in qualname:
         mod, cls = qualname.rsplit(".", 1)
-        return getattr(import_module(mod), cls)
+        # Backward-compat: accept alias "src.tokenizers" -> actual "src.stb_tokenizers"
+        if mod == "src.tokenizers" or mod.startswith("src.tokenizers"):
+            mod = mod.replace("src.tokenizers", "src.stb_tokenizers", 1)
+        try:
+            return getattr(import_module(mod), cls)
+        except ModuleNotFoundError:
+            # Fallback to local tokenizers package
+            import src.stb_tokenizers as T
+            return getattr(T, cls)
     # bare name -> try src.stb_tokenizers.<Name>
     import src.stb_tokenizers as T
     return getattr(T, qualname)
