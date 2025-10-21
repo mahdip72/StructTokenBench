@@ -1,5 +1,5 @@
 from .wrapped_myrep import WrappedMyRepTokenizer, MissingRepresentation
 from .wrapped_myrep_rh import WrappedMyRepRemoteHomologyTokenizer
 from .wrapped_myrep_shake import WrappedMyRepShakeTokenizer
-
+from .wrapped_myrep_biolip2 import WrappedMyRepBioLIP2Tokenizer
 # export any other local tokenizers here

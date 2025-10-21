@@ -102,6 +102,23 @@ def main(cfg):
     else:
         pretrained_model_cfg = {}
 
+    # Merge optional tokenizer_kwargs from Hydra (e.g., h5_path for continuous reps)
+    tok_kwargs = {}
+    try:
+        extra = getattr(cfg, "tokenizer_kwargs", None)
+        if extra is not None:
+            tok_kwargs = omegaconf.OmegaConf.to_container(extra, resolve=True)
+            if not isinstance(tok_kwargs, dict):
+                tok_kwargs = {}
+    except Exception:
+        tok_kwargs = {}
+    # For sensitivity / continuous runs, default to using raw features (no quantization)
+    if getattr(cfg.data, "use_continuous", False):
+        tok_kwargs.setdefault("quantize_continuous", False)
+        tok_kwargs.setdefault("fallback_to_any_chain", True)
+    # Let explicit Hydra kwargs override defaults from pretrained_model_cfg
+    tok_kwargs = {**pretrained_model_cfg, **tok_kwargs}
+
     # Build datamodule
     datamodule = data_module.ProteinDataModule(
         tokenizer_name=cfg.tokenizer,
@@ -112,7 +129,7 @@ def main(cfg):
         py_logger=logger,
         test_only=getattr(cfg, "test_only", False),
         precompute_tokens=getattr(cfg, "precompute_tokens", False),
-        tokenizer_kwargs=pretrained_model_cfg,
+        tokenizer_kwargs=tok_kwargs,
     )
     datamodule.setup()  # our edits inside DataModule do: fold_label->label, 45-class remap before sharding
 
@@ -131,6 +148,20 @@ def main(cfg):
     else:
         cfg.data.use_continuous = True
         logger.info("[run] Continuous tokenizer detected (H5 features).")
+
+        # For continuous tokenizers, align model.d_model to tokenizer embed_dim automatically
+        try:
+            tok = datamodule.get_tokenizer()
+            # support multiple tokenizer impls: prefer 'embed_dim', fallback to 'd_model'
+            embed_dim = getattr(tok, "embed_dim", None)
+            if embed_dim is None:
+                embed_dim = getattr(tok, "d_model", None)
+            if embed_dim is not None:
+                if getattr(cfg.model, "d_model", None) is None or int(cfg.model.d_model) != int(embed_dim):
+                    logger.info(f"[run] Setting model.d_model to tokenizer embed_dim={int(embed_dim)}")
+                    cfg.model.d_model = int(embed_dim)
+        except Exception:
+            pass
 
     # If the DataModule computed a 45-class mapping, force the head size to 45
     # so it's consistent with Table-2 Homo setting.

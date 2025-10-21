@@ -7,7 +7,7 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from src.baselines.wrapped_myrep import MissingRepresentation
-from src.stb_tokenizers import WrappedMyRepTokenizer
+from src.stb_tokenizers import WrappedMyRepTokenizer, WrappedMyRepShakeTokenizer
 from sklearn.model_selection import train_test_split
 
 from protein_chain import WrappedProteinChain
@@ -48,6 +48,12 @@ class ConformationalSwitchDataset(BaseDataset):
     def collate_fn(self, batch):
         """passed to DataLoader as collate_fn argument"""
         batch = list(filter(lambda x: x is not None, batch))
+        
+        # Handle empty batch (all samples were None, likely due to missing H5 embeddings)
+        if len(batch) == 0:
+            # Return a minimal valid batch or skip epoch; returning None signals PyTorch to skip
+            # For now, return a batch with empty tensors which will cause graceful exit or re-sample
+            return None
 
         prot1_input_ids, prot2_input_ids, labels = tuple(zip(*batch))
         kwargs = {
@@ -198,42 +204,17 @@ class ConformationalSwitchDataset(BaseDataset):
             # elif isinstance(self.tokenizer, WrappedOurPretrainedTokenizer):
             #     token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_chain, self.use_continuous, self.use_sequence) # torch.Tensors
             #     assert len(token_ids) == len(residue_index)
-            elif isinstance(self.tokenizer, WrappedMyRepTokenizer):
-                # Try current index; if the wrapper signals a missing rep, advance to the next item.
-                N = len(self.data)
-                start_i = index
-                i = index
-                while True:
-                    try:
-                        # Recompute fields for the current i (since i may change when we skip)
-                        item_i = self.data[i]
-                        pdb_chain_i, residue_range_i = item_i["pdb_chain"], item_i["residue_range"]
-                        pdb_id_i, chain_id_i = item_i["pdb_id"], item_i["chain_id"]
-                        pdb_path_i = self.retrieve_pdb_path(pdb_id_i, chain_id_i)
-
-                        # For non-Atlas datasets, normalize chain_id if needed
-                        if self.data_name == "AtlasDataset":
-                            chain_for_tok = " "
-                        else:
-                            chain_for_tok, _ = convert_chain_id(pdb_path_i, chain_id_i)
-
-                        assigned_labels_i = item_i[self.target_field]
-
-                        # Ask tokenizer for embeddings (may raise MissingRepresentation)
-                        token_ids, residue_index, seqs = self.tokenizer.encode_structure(
-                            pdb_path_i, chain_for_tok, self.use_sequence
-                        )
-                        # Success: use this sample and propagate the updated locals below
-                        item = item_i
-                        pdb_chain, residue_range = pdb_chain_i, residue_range_i
-                        assigned_labels = assigned_labels_i
-                        break
-
-                    except MissingRepresentation:
-                        i = (i + 1) % N
-                        if i == start_i:
-                            raise RuntimeError("All items are missing representations; nothing to iterate.")
-                        # continue loop and try next item
+            elif isinstance(self.tokenizer, (WrappedMyRepTokenizer, WrappedMyRepShakeTokenizer)):
+                # Read continuous representations from H5 for each protein; skip sample if missing
+                try:
+                    token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                        pdb_path, chain_id, self.use_sequence
+                    )
+                except Exception as e:
+                    import logging
+                    logger = logging.getLogger("dataset")
+                    logger.warning(f"[ConformationalSwitch] Failed to load H5 embeddings for {pdb_id}/{chain_id}: {e}")
+                    return None
             # select according to residue range constraints
             assert residue_range == [""]
             # filter proteins that are too long

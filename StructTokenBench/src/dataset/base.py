@@ -11,15 +11,19 @@ from torch.utils.data import Dataset
 
 from sklearn.model_selection import train_test_split
 from Bio import PDB
+from biotite.structure.io.pdbx import CIFFile, convert
 from biotite.sequence import Alphabet, Sequence, GeneralSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 
-from protein_chain import WrappedProteinChain
-from tokenizer import *
-import util
-from src.stb_tokenizers import WrappedMyRepShakeTokenizer
+from src.protein_chain import WrappedProteinChain
+from src import util
+from src.stb_tokenizers import WrappedMyRepShakeTokenizer, WrappedMyRepBioLIP2Tokenizer
 
 def convert_chain_id(pdb_path, chain_id):
+
+    # Ensure pdb_path is a string (Path objects on some platforms don't have
+    # str methods like endswith), avoid AttributeError for PosixPath/WindowsPath
+    pdb_path = str(pdb_path)
 
     if pdb_path.endswith(".pdb"):
         parser = PDB.PDBParser(QUIET=True)
@@ -160,17 +164,18 @@ class BaseDataset(Dataset):
 
     def collate_fn(self, batch):
         """
-        Robust collation for variable-length *continuous* features.
+        Robust collation for variable-length features.
 
-        Accepts:
-          - {"token_ids": FloatTensor(L,D), "label": int, "residue_index": (L,) optional}
+        Inputs per sample can be:
+          - {"token_ids": FloatTensor(L,D), "label": int|list[int], "residue_index": (L,) optional}
           - ({"token_ids": ...}, label)
           - (FloatTensor(L,D), label) or (ndarray(L,D), label)
 
-        Returns (for model_module.py):
-          - batch["input_list"]: a list with one dict containing padded tensors
-          - batch["targets"]:    LongTensor (B,)
-        Also returns friendly extras: token_ids, attention_mask, residue_index, labels, lengths
+        Outputs:
+          - input_list: list with one dict of padded tensors
+          - targets:
+              global task  -> LongTensor (B,)
+              local task   -> FloatTensor (B, Lmax) with -100 for pad
         """
         # remove Nones
         batch = [b for b in batch if b is not None]
@@ -187,7 +192,24 @@ class BaseDataset(Dataset):
                     item = dict(data)
                 else:
                     item = {"token_ids": data}
-                item["label"] = int(label)
+                # Accept per-residue labels as sequences
+                if isinstance(label, (list, tuple, np.ndarray, torch.Tensor)):
+                    item["label"] = label
+                else:
+                    try:
+                        item["label"] = int(label)
+                    except Exception:
+                        item["label"] = label
+                # Debug-print a few labels
+                try:
+                    if not hasattr(self, "_collate_debug_printed"):
+                        self._collate_debug_printed = 0
+                    if self._collate_debug_printed < 3:
+                        head = label[:10] if isinstance(label, (list, tuple)) else (label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(label) and label.ndim > 0 else label)
+                        print(f"[DEBUG][collate_fn] sample label type={type(label)}, len={len(label) if hasattr(label, '__len__') else 'NA'}, head={head}")
+                        self._collate_debug_printed += 1
+                except Exception:
+                    pass
             elif isinstance(s, dict):
                 item = dict(s)
                 if "label" not in item and "labels" in item:
@@ -212,7 +234,7 @@ class BaseDataset(Dataset):
             item["token_ids"] = x
 
             if "label" not in item:
-                item["label"] = 0  # default (should be overwritten upstream)
+                item["label"] = 0  # default (overwritten upstream)
 
             ri = item.get("residue_index", None)
             if ri is not None and not torch.is_tensor(ri):
@@ -234,12 +256,26 @@ class BaseDataset(Dataset):
         # attention mask semantics: True = padding, False = real token
         attn  = torch.ones((B, Lmax), dtype=torch.bool)
         resid = torch.zeros((B, Lmax), dtype=torch.int32)
-        labels = torch.zeros((B,), dtype=torch.long)
+
+        # Detect local vs global labels by inspecting first item's label
+        first_label = normed[0].get("label", 0)
+        is_local = isinstance(first_label, (list, tuple, np.ndarray, torch.Tensor))
+        # extra debug: print a summary of the first label
+        try:
+            head = first_label[:10] if isinstance(first_label, (list, tuple)) else (first_label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(first_label) and first_label.ndim > 0 else first_label)
+            print(f"[DEBUG][collate_fn] detected is_local={is_local}, first_label_type={type(first_label)}, head={head}")
+        except Exception:
+            pass
+
+        if is_local:
+            targets = torch.full((B, Lmax), fill_value=-100, dtype=torch.float32)
+        else:
+            targets = torch.zeros((B,), dtype=torch.long)
 
         for i, it in enumerate(normed):
             x = it["token_ids"]; L = x.shape[0]
             feats[i, :L] = x
-            attn[i, :L] = False  # mark real tokens as not-masked
+            attn[i, :L] = False
             if "residue_index" in it and it["residue_index"] is not None:
                 ri = it["residue_index"]
                 if not torch.is_tensor(ri):
@@ -247,24 +283,29 @@ class BaseDataset(Dataset):
                 resid[i, :L] = ri[:L]
             else:
                 resid[i, :L] = torch.arange(L, dtype=torch.int32)
-            labels[i] = int(it["label"])
+
+            lab = it.get("label", 0)
+            if is_local:
+                lab_t = torch.as_tensor(lab, dtype=torch.float32)
+                targets[i, :min(L, lab_t.shape[0])] = lab_t[:L]
+            else:
+                targets[i] = int(lab)
 
         lengths = torch.as_tensor(lengths, dtype=torch.int32)
 
-        #  Keys expected by your model:
         input_list = [{
-            "token_ids": feats,            # (B, Lmax, D)
-            "attention_mask": attn,        # (B, Lmax) bool, True=pad, False=token
-            "residue_index": resid,        # (B, Lmax) int32
-        }]
-        out = {
-            "input_list": input_list,
-            "targets": labels,              # (B,)
-            # extras (keep, can help debugging)
             "token_ids": feats,
             "attention_mask": attn,
             "residue_index": resid,
-            "labels": labels,
+        }]
+        out = {
+            "input_list": input_list,
+            "targets": targets,
+            # extras
+            "token_ids": feats,
+            "attention_mask": attn,
+            "residue_index": resid,
+            "labels": targets,
             "lengths": lengths,
         }
         return out
@@ -274,11 +315,19 @@ class BaseDataset(Dataset):
     
     def get_pdb_chain(self, pdb_id, chain_id):
         try:
-            file = os.path.join(self.PDB_DATA_DIR, f"mmcif_files/{pdb_id}.cif")
-            protein_chain = WrappedProteinChain.from_cif(file, 
-                                                chain_id=chain_id, id=pdb_id)
-        except:
-            self.py_logger.info(f"Cannot retrieve from local cluster, pdb_id: {pdb_id}, chain_id: {chain_id}")
+            # Support both forms:
+            #  - PDB_DATA_DIR=/.../pdb_data/
+            #  - PDB_DATA_DIR=/.../pdb_data/mmcif_files/
+            cand1 = os.path.join(self.PDB_DATA_DIR, "mmcif_files", f"{pdb_id}.cif")
+            cand2 = os.path.join(self.PDB_DATA_DIR, f"{pdb_id}.cif")
+            file = cand1 if os.path.exists(cand1) else cand2
+            protein_chain = WrappedProteinChain.from_cif(
+                file, chain_id=chain_id, id=pdb_id
+            )
+        except Exception:
+            self.py_logger.info(
+                f"Cannot retrieve from local cluster, pdb_id: {pdb_id}, chain_id: {chain_id}"
+            )
             return None
         return protein_chain
     
@@ -429,34 +478,28 @@ class BaseDataset(Dataset):
             assert len(assigned_labels) == len(label_residue_index)
 
 
-        # encode protein structure into token_ids
-        if isinstance(self.tokenizer, WrappedESM3Tokenizer):
-            # chain_id conversion is already automatically dealt with 
-            # WrappedProteinChain, and produced pdb_chain
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_chain, self.use_continuous, self.use_sequence) # torch.Tensors
-        elif isinstance(self.tokenizer, WrappedFoldSeekTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_continuous, self.use_sequence)
-        elif isinstance(self.tokenizer, WrappedProTokensTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_continuous, self.use_sequence)
-        elif isinstance(self.tokenizer, WrappedProteinMPNNTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_sequence)
-        elif isinstance(self.tokenizer, WrappedMIFTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_sequence)
-        elif isinstance(self.tokenizer, WrappedOurPretrainedTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_chain, self.use_continuous, self.use_sequence) # torch.Tensors
-        elif isinstance(self.tokenizer, WrappedAIDOTokenizer):
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_continuous, self.use_sequence)
-        elif isinstance(self.tokenizer, WrappedCheapS1D64Tokenizer):
-            # CheapS1D64 is continuous tokenizer
-            token_ids, residue_index, seqs = self.tokenizer.encode_structure(pdb_path, chain_id, self.use_sequence)
+        # encode protein structure into token_ids without importing tokenizer classes here
+        tok_name = getattr(self.tokenizer.__class__, "__name__", "")
+        if tok_name in [
+            "WrappedESM3Tokenizer",
+            "WrappedOurPretrainedTokenizer",
+        ]:
+            token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                pdb_chain, self.use_continuous, self.use_sequence
+            )
         elif isinstance(self.tokenizer, WrappedMyRepShakeTokenizer):
             # Continuous representation for ProteinShake tasks (or generic use)
             token_ids, residue_index, seqs = self.tokenizer.encode_structure(
                 pdb_path, chain_id, self.use_sequence
             )
+        elif isinstance(self.tokenizer, WrappedMyRepBioLIP2Tokenizer):
+            # Continuous representation for BioLIP2 tasks (same API as ProteinShake)
+            token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                pdb_path, chain_id, self.use_sequence
+            )
         else:
             raise NotImplementedError
-        
+
         assert len(token_ids) == len(residue_index)
         # code compatability in case token_ids store continuous reprs
         token_ids = token_ids.detach()
@@ -498,14 +541,27 @@ class BaseDataset(Dataset):
                 residue_index, token_ids = residue_index[align_indices_2], token_ids[align_indices_2]
                 seqs = [x for i,x in enumerate(seqs) if i in set(align_indices_2)]
 
+            # If alignment produced an empty sequence, skip this sample gracefully
+            if len(token_ids) == 0:
+                try:
+                    self.py_logger.warning(f"Empty alignment for pdb_id={pdb_id}, chain_id={chain_id}; skipping sample")
+                except Exception:
+                    pass
+                return None
 
             if org_len - len(token_ids) != 0:
                 print(">> residue reduced by : ", org_len - len(token_ids))
 
         # select according to residue range constraints for some global tasks
         selected_indices = self._get_selected_indices(residue_index, residue_range)
-        assert len(selected_indices) != 0
-        
+        # If nothing falls within the selected range, skip this sample instead of asserting
+        if len(selected_indices) == 0:
+            try:
+                self.py_logger.warning(f"No residues selected after range filtering for pdb_id={pdb_id}, chain_id={chain_id}, range={residue_range}; skipping sample")
+            except Exception:
+                pass
+            return None
+
         token_ids = token_ids[selected_indices]
         seqs = np.array(seqs)[selected_indices].tolist()
         if self.is_global_or_local == "local":
@@ -556,200 +612,4 @@ class BaseDataset(Dataset):
             self.data = new_data
         
     def additional_preprocessing_for_TAPE_homo(self, tokenizer_name):
-        """
-        Some proteins are skipped, because for all their residues, at least 
-        one backbone coordinates are NaN
-        """
-        if ((tokenizer_name == "proteinmpnn" or tokenizer_name == "mif") 
-            and self.data_name == "TapeRemoteHomologyDataset"):
-            
-            if self.split == "train":
-                skip_index = set([793, 796, 894, 1119, 1200, 1303, 1315, 1686, 1966, 2359, 
-                            2583, 3302, 4239, 4406, 4769, 4904, 7669, 9642, 9903, 9933, 
-                            9937, 10517, 11832, 11836, 11958])
-                new_data = []
-                for i in range(len(self.data)):
-                    if i not in skip_index:
-                        new_data.append(self.data[i])
-                self.data = new_data
-
-            if self.split == "valid":
-                
-                skip_index = set([499, 619, 630])
-                new_data = []
-                for i in range(len(self.data)):
-                    if i not in skip_index:
-                        new_data.append(self.data[i])
-                self.data = new_data
-            
-            if self.split == "test_family_holdout":
-                skip_index = set([41, 828, 1131])
-                new_data = []
-                for i in range(len(self.data)):
-                    if i not in skip_index:
-                        new_data.append(self.data[i])
-                self.data = new_data
-            
-            if self.split == "test_superfamily_holdout":
-                skip_index = set([97, 111, 115, 129, 350])
-                new_data = []
-                for i in range(len(self.data)):
-                    if i not in skip_index:
-                        new_data.append(self.data[i])
-                self.data = new_data
-            
-    
-    def cache_all_tokenized(self):
-        """Precompute all tokenization results"""
-        
-        # flag_list, name_list, type_list = [], [], []
-        # for tp in ALL_TOKENIZER_TYPE:
-        #     for key in ALL_TOKENIZER_TYPE[tp]:
-        #         flag_list.append(isinstance(self.tokenizer, eval(key)))
-        #         name_list.append(key.replace("Wrapped", "").replace("Tokenizer", "").lower())
-        #         type_list.append(tp)
-        # flag = any(flag_list)
-        #
-        # if flag:
-        #     index = np.nonzero(flag_list)[0].item()
-        #     tokenizer_name = name_list[index]
-        #     if isinstance(self.tokenizer, WrappedOurPretrainedTokenizer):
-        #         tokenizer_name += f"_{self.tokenizer.ckpt_name}"
-        #
-        #     # use continous reprs
-        #     continuous_flag = self.use_continuous
-        #     if type_list[index] == "continuous":
-        #         # continous flag only for discretized tokenizers (i.e., VQ-VAE-based PSTs)
-        #         # set to False to avoid redundancy for continuous tokenizers
-        #         continuous_flag = False
-        #     continuous_flag = "" if not continuous_flag else "_continuous"
-        #
-        #     # use sequence ids
-        #     sequence_flag = "" if not self.use_sequence else "_sequence"
-        #
-        #     # cache file to avoid redundant tokenizing for the same tokenizer
-        #     # when tuning hyper-parameters
-        #     cache_file_name = self.get_target_file_name() + f"_{tokenizer_name}_tokenized{continuous_flag}{sequence_flag}"
-        #     if os.path.exists(cache_file_name):
-        #         new_data = torch.load(cache_file_name, weights_only=False)
-        #         self.data = new_data
-        #         self.additional_label_filtering_for_TAPE_homo(tokenizer_name)
-        #         self.py_logger.info(f"Loading cahced tokenized data from {cache_file_name}")
-        #         return
-        #     else:
-        #         self.py_logger.info(f"Cannot load cahced tokenized data from {cache_file_name}, caching now")
-        # else:
-        #     raise NotImplementedError
-        #
-        #
-        # self.additional_preprocessing_for_TAPE_homo(tokenizer_name)
-        #
-        # # pre-checking
-        # for index in tqdm(range(len(self))):
-        #     try:
-        #         self[index]
-        #     except:
-        #         self.py_logger.info(f"[Error]: Something wrong for index {index} "
-        #                             f"when using {tokenizer_name}\n[Warning]: if "
-        #                             f"you're using your own PST, you can skip wrongly "
-        #                             f"indexed samples for your PST. But please be aware that "
-        #                             f"other PST benchmakred by the authors all used these samples")
-        #         raise IndexError
-        # if flag:
-        #     torch.save(self.data, cache_file_name)
-        try:
-            tok = getattr(self, "tokenizer", None)
-            if tok is None and hasattr(self, "datamodule"):
-                tok = self.datamodule.get_tokenizer()
-            if tok is not None and getattr(tok, "get_num_tokens", None):
-                if tok.get_num_tokens() is None:
-                    return  # no-op for continuous features
-        except Exception:
-            pass
-        raise NotImplementedError
-
-    def shard(self, shard_idx: int, num_shards: int):
-        """Shard the dataset inplace by keeping the every `num_shards`"""
-        self.py_logger.info(f"Loading shard {shard_idx} with world size {num_shards}")
-
-        indices = range(len(self))[shard_idx::num_shards]
-        self.data = [self.data[i] for i in indices]
-
-        self.py_logger.info("Done sharded loading.")
-
-    
-    def splitting_dataset(self, fold_split_ratio=0.4, fold_valid_ratio=0.2, 
-        superfamily_split_ratio=0.2, superfamily_valid_ratio=0.2, seed=42
-    ):
-        """
-        Perform splitting:
-        - step 1: for each fold, split superfamilies into two groups (60%, 40%) 
-            for training and test, resulting in the fold-level datasets
-        - step 2: among the fold-level training data, for each superfamily, 
-            split the family into two groups (60%, 40%) for training and test, 
-            resulting in the superfamily-level datasets
-        - Step 3: from the test data above, randomly take out 20% proteins 
-            to create a validation set
-        """
-
-        # for each fold, split superfamilies
-        fold_list, superfamily_list = [], []
-        for i in range(len(self.data)):
-            fold_list.append(self.data[i]["fold_label"])
-            superfamily_list.append(self.data[i]["superfamily_label"])
-        fold_list, superfamily_list = np.array(fold_list), np.array(superfamily_list)
-
-        fold_train_indices, fold_test_indices = [], []
-        for fold_idx in set(fold_list):
-            indices = (fold_list == fold_idx).nonzero()[0]
-            superfamily_vocab = list(set(superfamily_list[indices]))
-            if int(len(superfamily_vocab) * fold_split_ratio) > 0:
-                sf_train, sf_test = train_test_split(superfamily_vocab, 
-                                        test_size=fold_split_ratio, random_state=seed)
-                sf_train = np.isin(superfamily_list[indices], sf_train)
-                sf_test = np.isin(superfamily_list[indices], sf_test)
-                fold_train_indices += (indices[sf_train]).tolist()
-                fold_test_indices += (indices[sf_test]).tolist()
-            else:
-                fold_train_indices += indices.tolist()
-
-        fold_test_indices, fold_valid_indices = train_test_split(fold_test_indices, 
-                                    test_size=fold_valid_ratio, random_state=seed)
-
-        # among the fold-level training data, for each superfamily, random split 
-        fold_train_indices = np.array(fold_train_indices)
-        sf_train_indices, sf_test_indices = [], []
-        for sf_idx in set(superfamily_list[fold_train_indices].tolist()):
-            indices = (superfamily_list[fold_train_indices] == sf_idx).nonzero()[0]
-            if int(len(indices) * superfamily_split_ratio) > 0:
-                train_indices, test_indices = train_test_split(indices, 
-                                        test_size=superfamily_split_ratio, random_state=seed)
-                sf_train_indices += fold_train_indices[train_indices].tolist()
-                sf_test_indices += fold_train_indices[test_indices].tolist()
-            else:
-                sf_train_indices += fold_train_indices[indices].tolist()
-
-        sf_test_indices, sf_valid_indices = train_test_split(sf_test_indices, 
-                                    test_size=superfamily_valid_ratio, random_state=seed)
-        
-        train_indices = sf_train_indices
-        valid_indices = fold_valid_indices + sf_valid_indices
-        fold_test_indices = fold_test_indices
-        superfamily_test_indices = sf_test_indices
-
-        assert len(train_indices) == len(set(train_indices))
-        assert len(valid_indices) == len(set(valid_indices))
-        assert len(fold_test_indices) == len(set(fold_test_indices))
-        assert len(superfamily_test_indices) == len(set(superfamily_test_indices))
-        assert len(self.data) == (len(set(train_indices)) + len(set(valid_indices))
-                            + len(set(fold_test_indices)) + len(set(superfamily_test_indices)))
-
-        self.py_logger.info(f"After splitting, result in {len(train_indices)} training data, "
-                            f"{len(valid_indices)} validation data, {len(fold_test_indices)} fold-level test data, "
-                            f"{len(superfamily_test_indices)} superfamily-level test data")
-        
-        train_data = [self.data[idx] for idx in train_indices]
-        valid_data = [self.data[idx] for idx in valid_indices]
-        fold_test_data = [self.data[idx] for idx in fold_test_indices]
-        superfamily_test_data = [self.data[idx] for idx in superfamily_test_indices]
-        return train_data, valid_data, fold_test_data, superfamily_test_data
+        pass

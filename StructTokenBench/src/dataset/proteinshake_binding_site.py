@@ -63,17 +63,27 @@ class ProteinShakeBindingSiteDataset(BaseDataset):
         """
         Retrieves the path to the PDB file for a given pdb_id.
         """
+        # 1) Prefer local mmCIF files provided via self.PDB_DATA_DIR
+        #    BaseDataset.get_pdb_chain() uses the same convention.
+        try:
+            local_cif = Path(os.path.join(self.PDB_DATA_DIR, f"mmcif_files/{pdb_id}.cif"))
+            if local_cif.exists():
+                return local_cif
+        except Exception:
+            pass
+
+        # 2) Fallback to ProteinShake cache layout if present
         root = self._resolve_proteinshake_root()
         raw = root / "raw"
         pdb_dir = raw / pdb_id
-        # Prefer .pdb over .cif, but return the expected path regardless of existence
-        # Downstream code will handle missing files
-        for ext in ['.pdb', '.cif']:
+        for ext in [".pdb", ".cif"]:
             candidate = pdb_dir / f"{pdb_id}{ext}"
             if candidate.exists():
                 return candidate
-        # If neither exists, return the .pdb path as default
-        return pdb_dir / f"{pdb_id}.pdb"
+
+        # 3) As a last resort, return the expected local mmCIF path (may not exist).
+        #    Downstream code will either skip the sample or synthesize zeros for continuous reps.
+        return local_cif if 'local_cif' in locals() else (pdb_dir / f"{pdb_id}.pdb")
 
     # --------------------------- Internal helpers ---------------------------
 
