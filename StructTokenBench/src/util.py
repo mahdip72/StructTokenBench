@@ -63,26 +63,28 @@ def calculate_multiclass_clf_metric(logits, targets):
     }    
 
 def calculate_binary_clf_metric(logits, targets):
-    # logits: (M, )
-    # targets: (M, )
+    # logits: (M, ) raw scores from BCEWithLogits; targets: (M, ) in {0,1}
+    # Convert logits -> probabilities for threshold-based metrics (0.5 <-> logit 0.0)
 
     device = logits.device
+    probs = torch.sigmoid(logits)
+
     acc_func = BinaryAccuracy().to(device)
-    acc = acc_func(logits, targets)
+    acc = acc_func(probs, targets)
 
     auroc_func = AUROC(task="binary").to(device)
-    auroc = auroc_func(logits, targets)
+    auroc = auroc_func(probs, targets)
 
     f1_score_func = BinaryF1Score().to(device)
-    f1_score = f1_score_func(logits, targets)
+    f1_score = f1_score_func(probs, targets)
 
     mcc_func = BinaryMatthewsCorrCoef().to(device)
-    mcc = mcc_func(logits, targets)
+    mcc = mcc_func(probs, targets)
 
     cf_func = ConfusionMatrix(task="binary", num_classes=2, normalize="true").to(device)
-    cf_score = cf_func(logits, targets)
-    cf_all_func = ConfusionMatrix(task="binary", num_classes=2, normalize="all").to(device) # normalize to all samples
-    cf_all_score = cf_all_func(logits, targets)
+    cf_score = cf_func(probs, targets)
+    cf_all_func = ConfusionMatrix(task="binary", num_classes=2, normalize="all").to(device)  # normalize to all samples
+    cf_all_score = cf_all_func(probs, targets)
 
     return {
         "accuracy": acc,
@@ -93,7 +95,7 @@ def calculate_binary_clf_metric(logits, targets):
         "false_pos": cf_score[0, 1],
         "false_neg": cf_score[1, 0],
         "true_pos": cf_score[1, 1],
-        "true_neg_toall": cf_all_score[0,0],
+        "true_neg_toall": cf_all_score[0, 0],
         "false_pos_toall": cf_all_score[0, 1],
         "false_neg_toall": cf_all_score[1, 0],
         "true_pos_toall": cf_all_score[1, 1],
@@ -179,8 +181,16 @@ def setup_loggings(cfg):
         f"and {torch.cuda.device_count()} devices per-node"
     )
 
-    # set save directory path
-    cfg.save_dir_path = os.path.join(cfg.trainer.default_root_dir, cfg.run_name)
+    # set save directory path safely
+    root = getattr(cfg.trainer, "default_root_dir", None)
+    if root is None or str(root).strip() == "" or str(root).lower() == "none":
+        root = os.path.join(os.getcwd(), "struct_token_bench_logs")
+    try:
+        os.makedirs(root, exist_ok=True)
+    except Exception:
+        pass
+    run_name = getattr(cfg, "run_name", "run")
+    cfg.save_dir_path = os.path.join(str(root), str(run_name))
 
     return logger
 
