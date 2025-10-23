@@ -106,7 +106,7 @@ def _apply_45class_filter_and_remap(self, dataset, split):
 
 
 def load_class(qualname: str):
-    """Resolve both fully-qualified and bare class names."""
+    """Resolve both fully-qualified and bare class names for tokenizers."""
     if "." in qualname:
         mod, cls = qualname.rsplit(".", 1)
         # Backward-compat: accept alias "src.tokenizers" -> actual "src.stb_tokenizers"
@@ -115,13 +115,70 @@ def load_class(qualname: str):
         try:
             return getattr(import_module(mod), cls)
         except ModuleNotFoundError:
-            # Fallback to local tokenizers package
-            import src.stb_tokenizers as T
-            return getattr(T, cls)
-    # bare name -> try src.stb_tokenizers.<Name>
-    import src.stb_tokenizers as T
-    return getattr(T, qualname)
+            # Fallbacks: try src.stb_tokenizers then top-level stb_tokenizers
+            for alt in ("src.stb_tokenizers", "stb_tokenizers"):
+                try:
+                    return getattr(import_module(alt), cls)
+                except Exception:
+                    continue
+            raise
+    # bare name -> try src.stb_tokenizers.<Name>, then stb_tokenizers.<Name>
+    for mod in ("src.stb_tokenizers", "stb_tokenizers"):
+        try:
+            return getattr(import_module(mod), qualname)
+        except Exception:
+            continue
+    raise ModuleNotFoundError(f"Could not resolve tokenizer class '{qualname}' in known modules.")
 
+
+def load_dataset_class(qualname: str):
+    """Resolve dataset classes from either a fully-qualified path or the dataset package by bare name.
+    Avoids eval(); supports dataset packages that don't export symbols directly.
+    """
+    if "." in qualname:
+        mod, cls = qualname.rsplit(".", 1)
+        return getattr(import_module(mod), cls)
+    # Try dataset package export first
+    try:
+        import dataset as D
+        return getattr(D, qualname)
+    except Exception:
+        pass
+    # Fallback 1: guess module name from CamelCase -> snake_case and import dataset.<module>
+    import re
+    def camel_to_snake(name: str) -> str:
+        s1 = re.sub("(.)([A-Z][a-z]+)", r"\1_\2", name)
+        s2 = re.sub("([a-z0-9])([A-Z])", r"\1_\2", s1)
+        return s2.replace("__", "_").lower()
+    module_guess = camel_to_snake(qualname)
+    try:
+        mod = import_module(f"dataset.{module_guess}")
+        return getattr(mod, qualname)
+    except Exception:
+        # One more try: strip common suffix 'Dataset'
+        if qualname.endswith("Dataset"):
+            base = qualname[:-7]
+            module_guess2 = camel_to_snake(base)
+            try:
+                mod = import_module(f"dataset.{module_guess2}")
+                return getattr(mod, qualname)
+            except Exception:
+                pass
+    # Fallback 2: scan all modules in dataset package and return first match
+    try:
+        import pkgutil, importlib
+        import dataset as D
+        for m in pkgutil.iter_modules(D.__path__):
+            full = f"dataset.{m.name}"
+            try:
+                mod = importlib.import_module(full)
+                if hasattr(mod, qualname):
+                    return getattr(mod, qualname)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    raise AttributeError(f"Could not resolve dataset class '{qualname}'. Ensure it is importable or provide a fully-qualified path.")
 
 def get_tokenizer_device(tokenizer_device) -> torch.device:
     """Get CPU or local GPU
@@ -130,9 +187,12 @@ def get_tokenizer_device(tokenizer_device) -> torch.device:
         gpu_idx = 0
         if torch.distributed.is_initialized():
             gpu_idx = torch.distributed.get_rank()
-        device = torch.device(f"{tokenizer_device}:{gpu_idx}")
+        device = torch.device(f"cuda:{gpu_idx}")
     elif tokenizer_device == "cpu":
-        device = torch.device(tokenizer_device)
+        device = torch.device("cpu")
+    else:
+        # allow explicit indices like "cuda:0" or other torch device strings
+        device = torch.device(str(tokenizer_device))
     return device
 
 class ProteinDataModule(pl.LightningDataModule):
@@ -157,9 +217,10 @@ class ProteinDataModule(pl.LightningDataModule):
             self.all_split_names = []
         else:
             self.all_split_names = ["validation"]
-        self.all_split_names += eval(self.data_args.data_name).SPLIT_NAME["test"]
+        # replace eval(...) with explicit dataset class loader
+        self.all_split_names += load_dataset_class(self.data_args.data_name).SPLIT_NAME["test"]
         # to store device: tokenizer map to prevent multiple tokenizers on the same device
-        self.device_tokenizer_map = {} 
+        self.device_tokenizer_map = {}
 
     def prepare_data(self):
         pass
@@ -188,19 +249,18 @@ class ProteinDataModule(pl.LightningDataModule):
     def _setup_tokenizer(self):
         # if util has a helper, use it; otherwise pass the string
         try:
-            from util import get_tokenizer_device
-            device = get_tokenizer_device(self.tokenizer_device)
+            from util import get_tokenizer_device as _gtd
+            device = _gtd(self.tokenizer_device)
         except Exception:
-            device = self.tokenizer_device  # e.g., "cuda" or "cpu"
+            device = get_tokenizer_device(self.tokenizer_device)
 
         kwargs = dict(self.tokenizer_kwargs or {})
         Tok = load_class(
             self.tokenizer_name)  # <-- now resolves both "WrappedMyRepTokenizer" and "src.stb_tokenizers.WrappedMyRepTokenizer"
         tokenizer = Tok(device=device, **kwargs)
-        # Tok = load_class(self.cfg.tokenizer_module, self.cfg.tokenizer)
-        # kwargs = dict(self.cfg.tokenizer_kwargs or {})
-        # tokenizer = Tok(device=device, **kwargs)
-        self.tokenizer = tokenizer  # <-- add this line
+        self.tokenizer = tokenizer
+        # remember per-device instance to avoid re-instantiation
+        self.device_tokenizer_map[device] = tokenizer
         return tokenizer
 
 
@@ -237,7 +297,9 @@ class ProteinDataModule(pl.LightningDataModule):
             "tokenizer": self.get_tokenizer(),
             "in_memory": False,
         })
-        dataset = eval(self.data_args.data_name)(**kwargs)
+        # dataset = eval(self.data_args.data_name)(**kwargs)
+        DsCls = load_dataset_class(self.data_args.data_name)
+        dataset = DsCls(**kwargs)
 
         # ------- Remote Homology: enforce 45-class mapping BEFORE sharding -------
         try:
@@ -353,7 +415,7 @@ class PretrainingDataModule(pl.LightningDataModule):
         self.all_split_names = []
         if not self.test_only:
             self.all_split_names += ["validation"]
-        self.all_split_names += eval(self.data_args.data_name).SPLIT_NAME["test"]
+        self.all_split_names += load_dataset_class(self.data_args.data_name).SPLIT_NAME["test"]
 
         # to store device: tokenizer map to prevent multiple tokenizers on the same device
         self.device_tokenizer_map = {}
@@ -384,7 +446,9 @@ class PretrainingDataModule(pl.LightningDataModule):
             "seq_tokenizer": self.get_tokenizer(),
             "in_memory": False,
         })
-        dataset = eval(self.data_args.data_name)(**kwargs)
+        # dataset = eval(self.data_args.data_name)(**kwargs)
+        DsCls = load_dataset_class(self.data_args.data_name)
+        dataset = DsCls(**kwargs)
         # need to shard the dataset here:
         if torch.distributed.is_initialized():
             process_global_rank = torch.distributed.get_rank()

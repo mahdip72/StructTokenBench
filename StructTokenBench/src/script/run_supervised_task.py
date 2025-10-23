@@ -37,12 +37,24 @@ def setup_trainer(cfg):
         hydra.utils.instantiate(cfg.lightning.callbacks.progress_bar),
     ]
 
+    # trainer = pl.Trainer(
+    #     **cfg.trainer,
+    #     callbacks=callbacks,
+    #     plugins=[],
+    #     strategy=strategy,
+    #     logger=trainer_logger,
+    # )
+
+    from hydra.utils import instantiate
+
+    cb_cfg: dict = lightning_cfg.get("callbacks", {})  # dict-like
+    extra_callbacks = [instantiate(v) for v in cb_cfg.values()]  # NEW
+
     trainer = pl.Trainer(
         **cfg.trainer,
-        callbacks=callbacks,
-        plugins=[],
-        strategy=strategy,
-        logger=trainer_logger,
+        callbacks=extra_callbacks,  # use/add your callbacks
+        logger=instantiate(lightning_cfg["logger"]) if "logger" in lightning_cfg else True,
+        strategy=instantiate(lightning_cfg["strategy"]) if "strategy" in lightning_cfg else None,
     )
     return trainer
 

@@ -4,7 +4,7 @@ import h5py
 import numpy as np
 import torch
 
-from src.protein_chain import WrappedProteinChain as PC
+from ..protein_chain import WrappedProteinChain as PC
 
 
 class WrappedMyRepShakeTokenizer:
@@ -157,5 +157,3 @@ class WrappedMyRepShakeTokenizer:
                 self.h5.close()
         except Exception:
             pass
-
-
