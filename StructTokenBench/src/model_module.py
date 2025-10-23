@@ -233,6 +233,8 @@ class SequenceClassificationModel(ProceedingBaseModel):
             raise NotImplementedError
 
         self.d_model = d_model
+        # Lazy projection for continuous features whose dim != d_model
+        self.input_proj = None
         self.classify = SequenceClassificationHead(
             d_model, hidden_size, num_labels, num_layer, dropout
         )
@@ -374,6 +376,18 @@ class SequenceClassificationModel(ProceedingBaseModel):
                 feature = self.tokens_embed(input_ids)
             else:
                 raise ValueError("No continuous features provided and no tokens_embed available to embed input_ids.")
+
+        # Project feature to self.d_model if its last dim doesn't match classifier input
+        if feature is not None and feature.ndim == 3 and hasattr(self, "d_model") and self.d_model is not None:
+            feat_dim = feature.shape[-1]
+            if feat_dim != self.d_model:
+                # create/update a lazy projection layer
+                need_new = (not hasattr(self, "input_proj")) or (self.input_proj is None) \
+                           or (getattr(self.input_proj, "in_features", None) != feat_dim) \
+                           or (getattr(self.input_proj, "out_features", None) != self.d_model)
+                if need_new:
+                    self.input_proj = nn.Linear(feat_dim, self.d_model, bias=False).to(feature.device)
+                feature = self.input_proj(feature)
 
         # ensure targets are long class indices for global tasks; local will handle float later
         targets = targets.long()
@@ -689,6 +703,53 @@ class PlModel(pl.LightningModule):
         self._last_logged_batch_start_time = time.monotonic()
         super().setup(stage)
 
+    def on_load_checkpoint(self, checkpoint):
+        """
+        Make loading robust across runs where the transient input projection layer
+        (created lazily based on feature dim) may be present or absent, or shaped differently.
+        We drop any keys related to `model.input_proj.*` before restoring.
+        """
+        try:
+            state = checkpoint.get("state_dict", {})
+            if isinstance(state, dict):
+                drop_keys = [k for k in list(state.keys()) if k.startswith("model.input_proj.")]
+                for k in drop_keys:
+                    state.pop(k, None)
+        except Exception:
+            pass
+
+    def on_save_checkpoint(self, checkpoint):
+        """
+        Remove transient/lazy projection weights from saved checkpoints to avoid future
+        incompatibilities when feature dims change or when the layer wasn't created.
+        """
+        try:
+            state = checkpoint.get("state_dict", {})
+            if isinstance(state, dict):
+                drop_keys = [k for k in list(state.keys()) if k.startswith("model.input_proj.")]
+                for k in drop_keys:
+                    state.pop(k, None)
+        except Exception:
+            pass
+
+    def load_state_dict(self, state_dict, strict=True):
+        """
+        DeepSpeed restores by calling module.load_state_dict() directly and may pass strict=True.
+        Filter out transient/lazily-created projection weights and relax strictness.
+        """
+        try:
+            # Drop any keys for the lazy input projection layer (not always present)
+            filtered = {k: v for k, v in state_dict.items() if not k.startswith("model.input_proj.")}
+            # Always relax strict to avoid hard failure when shapes/layers differ across runs
+            return super().load_state_dict(filtered, strict=False)
+        except Exception:
+            # As a last resort, fall back to parent behavior with original dict but relaxed
+            try:
+                return super().load_state_dict(state_dict, strict=False)
+            except Exception:
+                # Let the original error bubble if even relaxed loading fails
+                return super().load_state_dict(state_dict, strict)
+
     def training_step(self, batch, batch_idx):
         outputs = self.model(batch["input_list"], batch["targets"])
         loss, metrics = outputs[0]
@@ -924,4 +985,3 @@ class PlModel(pl.LightningModule):
             return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "interval": "step"}}
 
         return optimizer
-

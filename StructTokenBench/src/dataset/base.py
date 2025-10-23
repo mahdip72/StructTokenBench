@@ -17,7 +17,7 @@ from biotite.sequence.align import align_optimal, SubstitutionMatrix
 
 from src.protein_chain import WrappedProteinChain
 from src import util
-from src.stb_tokenizers import WrappedMyRepShakeTokenizer, WrappedMyRepBioLIP2Tokenizer
+from src.stb_tokenizers import WrappedMyRepShakeTokenizer, WrappedMyRepBioLIP2Tokenizer, WrappedMyRepInterProTokenizer
 
 def convert_chain_id(pdb_path, chain_id):
 
@@ -232,7 +232,7 @@ class BaseDataset(Dataset):
                         self._collate_debug_printed = 0
                     if self._collate_debug_printed < 3:
                         head = label[:10] if isinstance(label, (list, tuple)) else (label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(label) and label.ndim > 0 else label)
-                        print(f"[DEBUG][collate_fn] sample label type={type(label)}, len={len(label) if hasattr(label, '__len__') else 'NA'}, head={head}")
+                        # print(f"[DEBUG][collate_fn] sample label type={type(label)}, len={len(label) if hasattr(label, '__len__') else 'NA'}, head={head}")
                         self._collate_debug_printed += 1
                 except Exception:
                     pass
@@ -533,6 +533,11 @@ class BaseDataset(Dataset):
             token_ids, residue_index, seqs = self.tokenizer.encode_structure(
                 pdb_path, chain_id, self.use_sequence
             )
+        elif isinstance(self.tokenizer, WrappedMyRepInterProTokenizer):
+            # Continuous representation for InterPro tasks (same API)
+            token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                pdb_path, chain_id, self.use_sequence
+            )
         else:
             raise NotImplementedError
 
@@ -559,7 +564,8 @@ class BaseDataset(Dataset):
                 idx_list = list(set(residue_index.tolist() + label_residue_index))
                 
                 alphabet = Alphabet(idx_list)
-                sim_score = np.diag(np.ones(len(idx_list)))
+                # SubstitutionMatrix requires an integer ndarray; ensure dtype explicitly
+                sim_score = np.eye(len(idx_list), dtype=np.int32)
                 substitution_matrix = SubstitutionMatrix(alphabet, alphabet, sim_score)
                 seq1 = GeneralSequence(alphabet, label_residue_index)
                 seq2 = GeneralSequence(alphabet, residue_index.tolist())
@@ -585,8 +591,8 @@ class BaseDataset(Dataset):
                     pass
                 return None
 
-            if org_len - len(token_ids) != 0:
-                print(">> residue reduced by : ", org_len - len(token_ids))
+            # if org_len - len(token_ids) != 0:
+                # print(">> residue reduced by : ", org_len - len(token_ids))
 
         # select according to residue range constraints for some global tasks
         selected_indices = self._get_selected_indices(residue_index, residue_range)

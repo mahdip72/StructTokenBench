@@ -250,7 +250,11 @@ def main(cfg):
             except Exception:
                 ckpt_for_val = None
 
-        val_results = trainer.validate(model=model, datamodule=datamodule, ckpt_path=ckpt_for_val)
+        try:
+            val_results = trainer.validate(model=model, datamodule=datamodule, ckpt_path=ckpt_for_val)
+        except Exception as e:
+            logger.warning(f"Validation with best checkpoint failed ({e}); falling back to current in-memory weights.")
+            val_results = trainer.validate(model=model, datamodule=datamodule, ckpt_path=None)
         _pretty_log_results(val_results, header="validation")
     else:
         logger.info("*********** start validation ***********\n")
