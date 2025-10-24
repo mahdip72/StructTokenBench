@@ -87,46 +87,61 @@ class WrappedMyRepInterProTokenizer:
         return cands
 
     def _read_from_h5(self, pdb_id: str, chain_up: str):
+        """
+        Return (embedding_array, indices_array) if found.
+        - embedding_array: np.ndarray (L, D) or (L,)
+        - indices_array:   np.ndarray (L,) of residue indices if available, else None
+        """
         if self.emb is None:
-            return None
+            return None, None
         try:
             if isinstance(self.emb, h5py.Group):
                 for k in self._candidate_keys(pdb_id, chain_up):
                     if k in self.emb:
                         obj = self.emb[k]
                         if isinstance(obj, h5py.Dataset):
-                            return obj[()]
+                            return obj[()], None
                         if isinstance(obj, h5py.Group):
+                            arr = None
+                            idx = None
                             # try common subdataset names first
                             for sub in ("embedding", "embeddings", "features"):
                                 if sub in obj and isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
-                            # fallback: first dataset child
-                            for sub in obj.keys():
-                                if isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
+                                    arr = obj[sub][()]
+                                    break
+                            if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
+                                idx = obj["indices"][()]
+                            if arr is not None:
+                                return arr, idx
                 if self.fallback:
                     # fall back to any entry: pick first dataset within the group
                     for k in self.emb.keys():
                         obj = self.emb[k]
                         if isinstance(obj, h5py.Dataset):
-                            return obj[()]
+                            return obj[()], None
                         if isinstance(obj, h5py.Group):
-                            for sub in obj.keys():
-                                if isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
+                            arr = None
+                            idx = None
+                            for sub in ("embedding", "embeddings", "features"):
+                                if sub in obj and isinstance(obj[sub], h5py.Dataset):
+                                    arr = obj[sub][()]
+                                    break
+                            if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
+                                idx = obj["indices"][()]
+                            if arr is not None:
+                                return arr, idx
             elif isinstance(self.emb, h5py.Dataset):
-                return self.emb[()]
+                return self.emb[()], None
         except Exception:
             pass
-        return None
+        return None, None
 
     @torch.no_grad()
     def encode_structure(self, pdb_path: str, chain_id: str, use_sequence: bool = False):
         pdb_id = os.path.basename(pdb_path).split(".")[0].lower()
         chain_up = (chain_id or "").strip().upper()
 
-        arr = self._read_from_h5(pdb_id, chain_up)
+        arr, idx = self._read_from_h5(pdb_id, chain_up)
 
         try:
             pc = PC.from_cif(pdb_path, chain_up or "detect", id=pdb_id)
@@ -145,7 +160,15 @@ class WrappedMyRepInterProTokenizer:
         feats = torch.as_tensor(arr, dtype=torch.float32, device=self.device)
         L = int(feats.shape[0])
 
-        if resid is None or resid.shape[0] != L:
+        # Prefer indices from H5 when available and matching
+        if idx is not None:
+            try:
+                idx = np.asarray(idx).astype(int)
+            except Exception:
+                idx = None
+        if idx is not None and idx.shape[0] == L:
+            resid = idx
+        elif resid is None or resid.shape[0] != L:
             resid = np.arange(L, dtype=int)
         seqs = seqs_real if (use_sequence and seqs_real is not None and len(seqs_real) == L) else ["X"] * L
 

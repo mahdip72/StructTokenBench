@@ -94,42 +94,56 @@ class WrappedMyRepBioLIP2Tokenizer:
         return cands
 
     def _read_from_h5(self, pdb_id: str, chain_up: str):
+        """
+        Return (embedding_array, indices_array) if found.
+        - embedding_array: np.ndarray (L, D) or (L,)
+        - indices_array:   np.ndarray (L,) of residue indices if available, else None
+        """
         if self.emb is None:
-            return None
+            return None, None
         try:
             if isinstance(self.emb, h5py.Group):
                 for k in self._candidate_keys(pdb_id, chain_up):
                     if k in self.emb:
                         obj = self.emb[k]
                         if isinstance(obj, h5py.Dataset):
-                            return obj[()]
+                            return obj[()], None
                         if isinstance(obj, h5py.Group):
-                            # try common subdataset names first
+                            arr = None
+                            idx = None
+                            # prefer common embedding dataset names
                             for sub in ("embedding", "embeddings", "features"):
                                 if sub in obj and isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
-                            # fallback: first dataset child
-                            for sub in obj.keys():
-                                if isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
+                                    arr = obj[sub][()]
+                                    break
+                            # optional indices
+                            if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
+                                idx = obj["indices"][()]
+                            if arr is not None:
+                                return arr, idx
                 if self.fallback:
                     # fall back to any entry: pick first dataset within the group
                     for k in self.emb.keys():
                         obj = self.emb[k]
                         if isinstance(obj, h5py.Dataset):
-                            return obj[()]
+                            return obj[()], None
                         if isinstance(obj, h5py.Group):
-                            for sub in obj.keys():
-                                if isinstance(obj[sub], h5py.Dataset):
-                                    return obj[sub][()]
-                            # as a last resort, if group contains a bare ndarray-like
-                    # if none found, return None
+                            arr = None
+                            idx = None
+                            for sub in ("embedding", "embeddings", "features"):
+                                if sub in obj and isinstance(obj[sub], h5py.Dataset):
+                                    arr = obj[sub][()]
+                                    break
+                            if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
+                                idx = obj["indices"][()]
+                            if arr is not None:
+                                return arr, idx
             elif isinstance(self.emb, h5py.Dataset):
                 # A single dataset for this entire H5 (rare). Use as-is.
-                return self.emb[()]
+                return self.emb[()], None
         except Exception:
             pass
-        return None
+        return None, None
 
     @torch.no_grad()
     def encode_structure(self, pdb_path: str, chain_id: str, use_sequence: bool = False):
@@ -144,7 +158,7 @@ class WrappedMyRepBioLIP2Tokenizer:
         chain_up = (chain_id or "").strip().upper()
 
         # 1) Try to fetch features from H5 if available
-        arr = self._read_from_h5(pdb_id, chain_up)
+        arr, idx = self._read_from_h5(pdb_id, chain_up)
 
         # 2) Load structure to determine length and residue numbering
         try:
@@ -170,7 +184,15 @@ class WrappedMyRepBioLIP2Tokenizer:
         feats = torch.as_tensor(arr, dtype=torch.float32, device=self.device)
         L = int(feats.shape[0])
 
-        if resid is None or resid.shape[0] != L:
+        # Prefer indices provided by H5 group when available and matching length
+        if idx is not None:
+            try:
+                idx = np.asarray(idx).astype(int)
+            except Exception:
+                idx = None
+        if idx is not None and idx.shape[0] == L:
+            resid = idx
+        elif resid is None or resid.shape[0] != L:
             resid = np.arange(L, dtype=int)
         seqs = seqs_real if (use_sequence and seqs_real is not None and len(seqs_real) == L) else ["X"] * L
 
