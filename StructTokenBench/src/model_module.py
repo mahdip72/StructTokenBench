@@ -663,7 +663,14 @@ class PlModel(pl.LightningModule):
                     behavior only used for inheritance
         """
 
-        self.trainer.strategy.config["train_micro_batch_size_per_gpu"] = self.optimizer_cfg.micro_batch_size
+        # Set micro batch size for DeepSpeed only (if available)
+        try:
+            cfg = getattr(self.trainer, "strategy", None)
+            ds_cfg = getattr(cfg, "config", None)
+            if isinstance(ds_cfg, dict):
+                ds_cfg["train_micro_batch_size_per_gpu"] = self.optimizer_cfg.micro_batch_size
+        except Exception:
+            pass
 
         # Build the inner model; pass a tensor if you want, or rely on the buffer we fill below
         self.model = model_init_fn(self.trainer, self.model_cfg,

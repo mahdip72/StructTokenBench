@@ -16,7 +16,7 @@ class AtlasDataset(BaseDataset):
     Dataset class for ATLAS residue-level properties (https://www.dsimb.inserm.fr/ATLAS/about.html)
     """
 
-    ALLOWED_TARGET_FIELDS = set(["Bfactor", "RMSF", "Neq"])
+    ALLOWED_TARGET_FIELDS = set(["Bfactor", "RMSF", "Neq"])  # columns in CSV
 
     FULL_FIELD_MAPPING = {
         "bfactor_score": "Bfactor",
@@ -36,8 +36,10 @@ class AtlasDataset(BaseDataset):
     }
     
     def __init__(self, *args, **kwargs):
-        assert kwargs.get("target_filed", set()).issubset(self.ALLOWED_TARGET_FIELDS)
-        super().__init__(self, *args, **kwargs)
+        # Expect target_field to be one of the keys (bfactor_score/rmsf_score/neq_score)
+        tf = kwargs.get("target_field", None)
+        assert tf in self.FULL_FIELD_MAPPING, f"target_field must be one of {list(self.FULL_FIELD_MAPPING.keys())}"
+        super().__init__(*args, **kwargs)
         self.tokenizer = kwargs.get("tokenizer")
     
     def __getitem__(self, index: int):
@@ -153,7 +155,10 @@ class AtlasDataset(BaseDataset):
         self.data[index][self.target_field] = local_labels
         # it's already ensured that "annot_df" align with pdb_chain in "load_structure" function
 
-        token_ids, assigned_labels, seqs = BaseDataset._get_item_structural_tokens(self, index, skip_check=True)
+        res = BaseDataset._get_item_structural_tokens(self, index, skip_check=True)
+        if res is None:
+            return None
+        token_ids, assigned_labels, seqs = res
         assert len(token_ids) == len(assigned_labels)
         return token_ids, assigned_labels, seqs
 

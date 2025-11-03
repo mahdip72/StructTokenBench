@@ -114,13 +114,34 @@ def load_class(qualname: str):
             mod = mod.replace("src.tokenizers", "src.stb_tokenizers", 1)
         try:
             return getattr(import_module(mod), cls)
-        except ModuleNotFoundError:
+        except Exception:
             # Fallbacks: try src.stb_tokenizers then top-level stb_tokenizers
             for alt in ("src.stb_tokenizers", "stb_tokenizers"):
                 try:
                     return getattr(import_module(alt), cls)
                 except Exception:
                     continue
+            # Deep fallback: scan submodules under stb_tokenizers for the class
+            try:
+                import pkgutil, importlib
+                for base in ("src.stb_tokenizers", "stb_tokenizers"):
+                    try:
+                        pkg = import_module(base)
+                        paths = getattr(pkg, "__path__", None)
+                        if not paths:
+                            continue
+                        for m in pkgutil.iter_modules(paths):
+                            full = f"{base}.{m.name}"
+                            try:
+                                mod_obj = importlib.import_module(full)
+                                if hasattr(mod_obj, cls):
+                                    return getattr(mod_obj, cls)
+                            except Exception:
+                                continue
+                    except Exception:
+                        continue
+            except Exception:
+                pass
             raise
     # bare name -> try src.stb_tokenizers.<Name>, then stb_tokenizers.<Name>
     for mod in ("src.stb_tokenizers", "stb_tokenizers"):
@@ -128,6 +149,27 @@ def load_class(qualname: str):
             return getattr(import_module(mod), qualname)
         except Exception:
             continue
+    # Deep fallback: scan submodules under stb_tokenizers for the class
+    try:
+        import pkgutil, importlib
+        for base in ("src.stb_tokenizers", "stb_tokenizers"):
+            try:
+                pkg = import_module(base)
+                paths = getattr(pkg, "__path__", None)
+                if not paths:
+                    continue
+                for m in pkgutil.iter_modules(paths):
+                    full = f"{base}.{m.name}"
+                    try:
+                        mod = importlib.import_module(full)
+                        if hasattr(mod, qualname):
+                            return getattr(mod, qualname)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
     raise ModuleNotFoundError(f"Could not resolve tokenizer class '{qualname}' in known modules.")
 
 

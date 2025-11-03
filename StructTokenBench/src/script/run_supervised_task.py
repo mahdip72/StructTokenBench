@@ -5,8 +5,15 @@ import hydra
 import omegaconf
 
 import pytorch_lightning as pl
+from pytorch_lightning.strategies import DDPStrategy
 import torch
 from torch.utils.tensorboard import SummaryWriter
+
+# Enable Tensor Core accelerated matmul for float32 where applicable
+try:
+    torch.set_float32_matmul_precision("high")
+except Exception:
+    pass
 
 # local imports
 exc_dir = os.path.dirname(os.path.dirname(__file__))  # "src/"
@@ -28,7 +35,8 @@ def setup_trainer(cfg):
     if cfg.deepspeed_path:
         strategy = hydra.utils.instantiate(cfg.lightning.strategy)
     else:
-        strategy = "ddp"  # distributed data parallel
+        # Use DDP with find_unused_parameters=True to handle modules not contributing to loss every step
+        strategy = DDPStrategy(find_unused_parameters=True)
 
     # callbacks
     callbacks = [
@@ -37,24 +45,29 @@ def setup_trainer(cfg):
         hydra.utils.instantiate(cfg.lightning.callbacks.progress_bar),
     ]
 
-    # trainer = pl.Trainer(
-    #     **cfg.trainer,
-    #     callbacks=callbacks,
-    #     plugins=[],
-    #     strategy=strategy,
-    #     logger=trainer_logger,
-    # )
-
     from hydra.utils import instantiate
 
-    cb_cfg: dict = lightning_cfg.get("callbacks", {})  # dict-like
-    extra_callbacks = [instantiate(v) for v in cb_cfg.values()]  # NEW
+    cb_cfg: dict = cfg.lightning.get("callbacks", {})  # dict-like
+    # Instantiate, flatten, and filter only valid Lightning Callbacks
+    raw_callbacks = []
+    for v in (cb_cfg.values() if hasattr(cb_cfg, "values") else []):
+        try:
+            obj = instantiate(v)
+        except Exception:
+            obj = None
+        if obj is None:
+            continue
+        if isinstance(obj, (list, tuple)):
+            raw_callbacks.extend(obj)
+        else:
+            raw_callbacks.append(obj)
+    extra_callbacks = [c for c in raw_callbacks if isinstance(c, pl.Callback)]
 
     trainer = pl.Trainer(
         **cfg.trainer,
-        callbacks=extra_callbacks,  # use/add your callbacks
-        logger=instantiate(lightning_cfg["logger"]) if "logger" in lightning_cfg else True,
-        strategy=instantiate(lightning_cfg["strategy"]) if "strategy" in lightning_cfg else None,
+        callbacks=extra_callbacks,  # only pass valid Callback instances
+        logger=trainer_logger,
+        strategy=strategy,
     )
     return trainer
 

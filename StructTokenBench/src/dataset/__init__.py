@@ -1,5 +1,3 @@
-
-
 from dataset.biolip2 import BioLIP2FunctionDataset
 from dataset.tape_remote_homology import TapeRemoteHomologyDataset
 from dataset.atlas import AtlasDataset

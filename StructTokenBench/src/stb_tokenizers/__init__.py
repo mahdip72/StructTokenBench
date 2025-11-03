@@ -3,4 +3,6 @@ from .wrapped_myrep_rh import WrappedMyRepRemoteHomologyTokenizer
 from .wrapped_myrep_shake import WrappedMyRepShakeTokenizer
 from .wrapped_myrep_biolip2 import WrappedMyRepBioLIP2Tokenizer
 from .wrapped_myrep_interpro import WrappedMyRepInterProTokenizer
+from .wrapped_myrep_proteinglue import WrappedMyRepProteinGLUETokenizer
+from .wrapped_myrep_atlas import WrappedMyRepAtlasTokenizer
 # export any other local tokenizers here

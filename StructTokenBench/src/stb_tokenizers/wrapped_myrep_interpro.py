@@ -35,6 +35,8 @@ class WrappedMyRepInterProTokenizer:
         self.h5_path = None
         self.h5 = None
         self.emb = None
+        self._last_debug_info = None
+        self._last_h5_key = None
 
         if h5_path:
             self.h5_path = os.path.abspath(os.path.expanduser(h5_path))
@@ -92,14 +94,18 @@ class WrappedMyRepInterProTokenizer:
         - embedding_array: np.ndarray (L, D) or (L,)
         - indices_array:   np.ndarray (L,) of residue indices if available, else None
         """
+        # Prefer configured subgroup, but allow scanning the root group when unset
         if self.emb is None:
-            return None, None
+            grp = self.h5
+        else:
+            grp = self.emb
         try:
-            if isinstance(self.emb, h5py.Group):
+            if isinstance(grp, h5py.Group):
                 for k in self._candidate_keys(pdb_id, chain_up):
-                    if k in self.emb:
-                        obj = self.emb[k]
+                    if k in grp:
+                        obj = grp[k]
                         if isinstance(obj, h5py.Dataset):
+                            self._last_h5_key = k
                             return obj[()], None
                         if isinstance(obj, h5py.Group):
                             arr = None
@@ -107,6 +113,7 @@ class WrappedMyRepInterProTokenizer:
                             # try common subdataset names first
                             for sub in ("embedding", "embeddings", "features"):
                                 if sub in obj and isinstance(obj[sub], h5py.Dataset):
+                                    self._last_h5_key = f"{k}/{sub}"
                                     arr = obj[sub][()]
                                     break
                             if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
@@ -115,23 +122,26 @@ class WrappedMyRepInterProTokenizer:
                                 return arr, idx
                 if self.fallback:
                     # fall back to any entry: pick first dataset within the group
-                    for k in self.emb.keys():
-                        obj = self.emb[k]
+                    for k in grp.keys():
+                        obj = grp[k]
                         if isinstance(obj, h5py.Dataset):
+                            self._last_h5_key = k
                             return obj[()], None
                         if isinstance(obj, h5py.Group):
                             arr = None
                             idx = None
                             for sub in ("embedding", "embeddings", "features"):
                                 if sub in obj and isinstance(obj[sub], h5py.Dataset):
+                                    self._last_h5_key = f"{k}/{sub}"
                                     arr = obj[sub][()]
                                     break
                             if "indices" in obj and isinstance(obj["indices"], h5py.Dataset):
                                 idx = obj["indices"][()]
                             if arr is not None:
                                 return arr, idx
-            elif isinstance(self.emb, h5py.Dataset):
-                return self.emb[()], None
+            elif isinstance(grp, h5py.Dataset):
+                self._last_h5_key = "/"
+                return grp[()], None
         except Exception:
             pass
         return None, None
@@ -142,14 +152,41 @@ class WrappedMyRepInterProTokenizer:
         chain_up = (chain_id or "").strip().upper()
 
         arr, idx = self._read_from_h5(pdb_id, chain_up)
+        raw_len = None
+        raw_idx_len = None
+        key_used = self._last_h5_key
+        # Filter out -1 indices and all-zero embedding rows if present
+        if arr is not None:
+            if arr.ndim == 1:
+                arr = arr[None, :]
+            raw_len = int(arr.shape[0])
+            if idx is not None:
+                try:
+                    idx = np.asarray(idx).astype(int)
+                    raw_idx_len = int(idx.shape[0])
+                except Exception:
+                    idx = None
+            # Never drop rows based solely on indices == -1; only optionally filter all-zero rows
+            try:
+                row_nonzero = ~np.all(arr == 0, axis=-1)
+            except Exception:
+                row_nonzero = np.ones((arr.shape[0],), dtype=bool)
+            try:
+                arr = arr[row_nonzero]
+                if idx is not None and hasattr(idx, "shape") and idx.shape[0] == row_nonzero.shape[0]:
+                    idx = idx[row_nonzero]
+            except Exception:
+                pass
 
         try:
             pc = PC.from_cif(pdb_path, chain_up or "detect", id=pdb_id)
             resid = np.asarray(pc.residue_index, dtype=int)
             seqs_real = list(pc.sequence)
+            pc_len = int(resid.shape[0]) if resid is not None else None
         except Exception:
             resid = None
             seqs_real = None
+            pc_len = None
 
         if arr is None:
             L = int(len(resid)) if resid is not None else 128
@@ -166,13 +203,33 @@ class WrappedMyRepInterProTokenizer:
                 idx = np.asarray(idx).astype(int)
             except Exception:
                 idx = None
+        used_idx_from_h5 = False
         if idx is not None and idx.shape[0] == L:
             resid = idx
+            used_idx_from_h5 = True
         elif resid is None or resid.shape[0] != L:
             resid = np.arange(L, dtype=int)
+        used_pc_resid = resid is not None and not used_idx_from_h5
         seqs = seqs_real if (use_sequence and seqs_real is not None and len(seqs_real) == L) else ["X"] * L
 
+        # Save debug info for upstream consumers
+        self._last_debug_info = {
+            "pdb_id": pdb_id,
+            "chain_id": chain_up,
+            "h5_key": key_used,
+            "h5_raw_len": raw_len,
+            "h5_after_zero_len": int(arr.shape[0]) if arr is not None else None,
+            "h5_idx_raw_len": raw_idx_len,
+            "pc_resid_len": pc_len,
+            "final_L": L,
+            "used_idx_from_h5": used_idx_from_h5,
+            "used_pc_resid": used_pc_resid,
+        }
+
         return feats, resid, seqs
+
+    def get_last_debug_info(self):
+        return self._last_debug_info
 
     def close(self):
         try:

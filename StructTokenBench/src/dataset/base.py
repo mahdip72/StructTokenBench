@@ -15,12 +15,28 @@ from biotite.structure.io.pdbx import CIFFile, convert
 from biotite.sequence import Alphabet, Sequence, GeneralSequence
 from biotite.sequence.align import align_optimal, SubstitutionMatrix
 
-from src.protein_chain import WrappedProteinChain
-from src import util
-from src.stb_tokenizers import WrappedMyRepShakeTokenizer, WrappedMyRepBioLIP2Tokenizer, WrappedMyRepInterProTokenizer
+# Robust imports that work whether the package is executed as `-m src.*` or with src/ on sys.path
+from importlib import import_module
+try:
+    WrappedProteinChain = getattr(import_module("src.protein_chain"), "WrappedProteinChain")
+except Exception:
+    WrappedProteinChain = getattr(import_module("protein_chain"), "WrappedProteinChain")
+try:
+    util = import_module("src.util")
+except Exception:
+    util = import_module("util")
+try:
+    tkmod = import_module("src.stb_tokenizers")
+except Exception:
+    tkmod = import_module("stb_tokenizers")
+WrappedMyRepShakeTokenizer = getattr(tkmod, "WrappedMyRepShakeTokenizer")
+WrappedMyRepBioLIP2Tokenizer = getattr(tkmod, "WrappedMyRepBioLIP2Tokenizer")
+WrappedMyRepInterProTokenizer = getattr(tkmod, "WrappedMyRepInterProTokenizer")
+WrappedMyRepProteinGLUETokenizer = getattr(tkmod, "WrappedMyRepProteinGLUETokenizer")
+WrappedMyRepAtlasTokenizer = getattr(tkmod, "WrappedMyRepAtlasTokenizer", None)
+
 
 def convert_chain_id(pdb_path, chain_id):
-
     # Ensure pdb_path is a string (Path objects on some platforms don't have
     # str methods like endswith), avoid AttributeError for PosixPath/WindowsPath
     pdb_path = str(pdb_path)
@@ -29,26 +45,26 @@ def convert_chain_id(pdb_path, chain_id):
         parser = PDB.PDBParser(QUIET=True)
     else:
         parser = PDB.MMCIFParser(QUIET=True)
-    
+
     structure = parser.get_structure("check", pdb_path)
     if chain_id in structure[0]:
         return chain_id, False
 
-    atom_array = convert.get_structure(CIFFile.read(pdb_path), model=1, 
-                        extra_fields=["b_factor"])
-    new_atom_array = convert.get_structure(CIFFile.read(pdb_path), model=1, 
-                        extra_fields=["b_factor"], use_author_fields=False)
-    chain_id_mapping = [(x,y) for x,y in zip(atom_array.chain_id, new_atom_array.chain_id) if y == chain_id]
-    
+    atom_array = convert.get_structure(CIFFile.read(pdb_path), model=1,
+                                       extra_fields=["b_factor"])
+    new_atom_array = convert.get_structure(CIFFile.read(pdb_path), model=1,
+                                           extra_fields=["b_factor"], use_author_fields=False)
+    chain_id_mapping = [(x, y) for x, y in zip(atom_array.chain_id, new_atom_array.chain_id) if y == chain_id]
+
     assert len(set([x[0] for x in chain_id_mapping])) == 1
-    
+
     new_chain_id = chain_id_mapping[0][0]
     return new_chain_id, True
 
-class BaseDataset(Dataset):
 
+class BaseDataset(Dataset):
     NONE_RETURN_LOAD_STRUCTURE = {
-        "pdb_id": None, 
+        "pdb_id": None,
         "chain_id": None,
         "residue_range": None,
         "pdb_chain": None,
@@ -76,16 +92,19 @@ class BaseDataset(Dataset):
         self.PDB_DATA_DIR = kwargs["pdb_data_dir"]
         self.fast_dev_run = kwargs.get("fast_dev_run", False)
         self.data_name = kwargs["data_name"]
+        # Normalize dataset name to bare class name to handle fully-qualified paths
+        if isinstance(self.data_name, str) and "." in self.data_name:
+            self.data_name = self.data_name.split(".")[-1]
 
         self.use_continuous = kwargs["use_continuous"]
         # `use_sequence`` for BaseDataset is always set to True to pass sequence
-        # information to models, while `use_sequence` for the model itself is 
+        # information to models, while `use_sequence` for the model itself is
         # False by default to disable using sequence during tokenization
         self.use_sequence = True
 
         # try to load pre-processed data
         target_split_file = self.get_target_file_name()
-        
+
         if os.path.exists(target_split_file):
             self.data = torch.load(target_split_file, weights_only=False)
             self.py_logger.info(f"Loading from processed file {target_split_file},"
@@ -100,13 +119,13 @@ class BaseDataset(Dataset):
 
             # preprocess index mappings before loading PDB structures, different for every datasets
             self.prepare_structure_loading()
-                
+
             self.load_all_structures()
 
             self.sanity_check()
             # save to disk
             self.save_structured_data()
-            
+
         # Dataset sharding will be done in LightningDataModule
 
         # assign tokenizer if haven't been assign in `process_data_from_scratch`
@@ -117,29 +136,30 @@ class BaseDataset(Dataset):
 
         self.patch_for_TAPE_homo()
 
-    def patch_due_to_protokens(self,):
+    def patch_due_to_protokens(self, ):
         """filter because ProTokens cannot proceed proteins longer than 1024
         """
         len_limit = 1024
         new_data = []
         if self.data_name == "ConformationalSwitchDataset":
             for i in range(len(self.data)):
-                if (len(self.data[i]["prot1_pdb_chain"].sequence) <= len_limit 
-                    and len(self.data[i]["prot2_pdb_chain"].sequence) <= len_limit):
+                if (len(self.data[i]["prot1_pdb_chain"].sequence) <= len_limit
+                        and len(self.data[i]["prot2_pdb_chain"].sequence) <= len_limit):
                     new_data.append(self.data[i])
         else:
             for i in range(len(self.data)):
                 if len(self.data[i]["pdb_chain"].sequence) <= len_limit:
                     new_data.append(self.data[i])
-            
+
         if len(new_data) != len(self.data):
             self.data = new_data
-            self.py_logger.info(f"reduce sequence lengths because of ProTokens from {len(self.data)} to {len(new_data)}")
+            self.py_logger.info(
+                f"reduce sequence lengths because of ProTokens from {len(self.data)} to {len(new_data)}")
 
-    def patch_for_TAPE_homo(self,):
+    def patch_for_TAPE_homo(self, ):
         """
         Filter proteins causing error in TAPE RH, which are indexed at 11220 (out of 12071) and 11958 (out of 12070)
-        Error Example: 
+        Error Example:
             Bio.PDB.PDBExceptions.PDBConstructionException: Blank altlocs in duplicate residue SER (' ', 22, ' ') of chain 'A'
         Error Explanation: https://biopython.org/wiki/Reading_large_PDB_files
         """
@@ -148,9 +168,9 @@ class BaseDataset(Dataset):
             self.data = self.data[:skip_index] + self.data[skip_index + 1:]
             skip_index = 11958
             self.data = self.data[:skip_index] + self.data[skip_index + 1:]
-    
+
             self.py_logger.info(f"reduce sequence lengths for TAPE Homo to {len(self.data)}")
-    
+
     def shard(self, shard_idx: int, num_shards: int):
         """
         Shard the dataset across multiple processes.
@@ -172,18 +192,18 @@ class BaseDataset(Dataset):
         # Log the sharding if possible
         try:
             self.py_logger.info(f"Sharded dataset: shard {shard_idx}/{num_shards}, "
-                               f"samples {start_idx} to {end_idx-1} (total {len(self.data)})")
+                                f"samples {start_idx} to {end_idx - 1} (total {len(self.data)})")
         except Exception:
             pass
 
-    def get_target_file_name(self,):
+    def get_target_file_name(self, ):
         assert NotImplementedError
 
     def save_structured_data(self, ):
         file = self.get_target_file_name()
         torch.save(self.data, file)
         self.py_logger.info(f"Save the processed, structured data to disk: {file}")
-    
+
     def prepare_structure_loading(self):
         # default no-op; datasets can override if they need special preprocessing
         return None
@@ -231,7 +251,9 @@ class BaseDataset(Dataset):
                     if not hasattr(self, "_collate_debug_printed"):
                         self._collate_debug_printed = 0
                     if self._collate_debug_printed < 3:
-                        head = label[:10] if isinstance(label, (list, tuple)) else (label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(label) and label.ndim > 0 else label)
+                        head = label[:10] if isinstance(label, (list, tuple)) else (
+                            label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(
+                                label) and label.ndim > 0 else label)
                         # print(f"[DEBUG][collate_fn] sample label type={type(label)}, len={len(label) if hasattr(label, '__len__') else 'NA'}, head={head}")
                         self._collate_debug_printed += 1
                 except Exception:
@@ -275,12 +297,15 @@ class BaseDataset(Dataset):
         # pad
         lengths = [int(x["token_ids"].shape[0]) for x in normed]
         Lmax = max(lengths)
-        D = int(normed[0]["token_ids"].shape[1])
+        # Support mixed feature dims (e.g., 128 vs 256) by padding to the max dim in the batch
+        dims = [int(it["token_ids"].shape[1]) for it in normed]
+        Dmax = max(dims)
+        Dmin = min(dims)
         B = len(normed)
 
-        feats = torch.zeros((B, Lmax, D), dtype=torch.float32)
+        feats = torch.zeros((B, Lmax, Dmax), dtype=torch.float32)
         # attention mask semantics: True = padding, False = real token
-        attn  = torch.ones((B, Lmax), dtype=torch.bool)
+        attn = torch.ones((B, Lmax), dtype=torch.bool)
         resid = torch.zeros((B, Lmax), dtype=torch.int32)
 
         # Detect local vs global labels by inspecting first item's label
@@ -288,8 +313,13 @@ class BaseDataset(Dataset):
         is_local = isinstance(first_label, (list, tuple, np.ndarray, torch.Tensor))
         # extra debug: print a summary of the first label
         try:
-            head = first_label[:10] if isinstance(first_label, (list, tuple)) else (first_label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(first_label) and first_label.ndim > 0 else first_label)
-            print(f"[DEBUG][collate_fn] detected is_local={is_local}, first_label_type={type(first_label)}, head={head}")
+            head = first_label[:10] if isinstance(first_label, (list, tuple)) else (
+                first_label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(
+                    first_label) and first_label.ndim > 0 else first_label)
+            print(
+                f"[DEBUG][collate_fn] detected is_local={is_local}, first_label_type={type(first_label)}, head={head}")
+            if Dmin != Dmax:
+                print(f"[WARN][collate_fn] Mixed embedding dims in batch: min={Dmin}, max={Dmax}. Padding smaller dims with zeros.")
         except Exception:
             pass
 
@@ -299,8 +329,10 @@ class BaseDataset(Dataset):
             targets = torch.zeros((B,), dtype=torch.long)
 
         for i, it in enumerate(normed):
-            x = it["token_ids"]; L = x.shape[0]
-            feats[i, :L] = x
+            x = it["token_ids"]
+            L = x.shape[0]
+            # Copy features; if x has smaller dim, place in the leading slice and leave the rest zeros
+            feats[i, :L, :x.shape[1]] = x
             attn[i, :L] = False
             if "residue_index" in it and it["residue_index"] is not None:
                 ri = it["residue_index"]
@@ -335,10 +367,10 @@ class BaseDataset(Dataset):
             "lengths": lengths,
         }
         return out
-    
+
     def __len__(self) -> int:
         return len(self.data)
-    
+
     def get_pdb_chain(self, pdb_id, chain_id):
         try:
             # Support multiple layouts:
@@ -358,10 +390,10 @@ class BaseDataset(Dataset):
             )
             return None
         return protein_chain
-    
+
     def _get_init_cnt_stats(self):
         return {}
-    
+
     def load_structure(self, idx, cnt_stats):
         """
         Arguments:
@@ -369,17 +401,17 @@ class BaseDataset(Dataset):
             cnt_stats: a dict to calculate statistics for unsable data entries
         Return:
             {
-                "pdb_id": pdb_id, 
+                "pdb_id": pdb_id,
                 "chain_id": chain_id,
                 "residue_range": residue_range,
-                "pdb_chain": pdb_chain, 
+                "pdb_chain": pdb_chain,
                 "local_label": local_label # optional
             }
-            # residue_range default as [""] to indicate the whole protein; 
+            # residue_range default as [""] to indicate the whole protein;
             # e.g., ["6-100"] to indicate PDB residue_index ranging from 6 to 100
         """
         assert NotImplementedError
-        
+
     def load_all_structures(self, ):
         """For each pdb_id in self.data[], load its pdb structures by
         calling self.load_structure()
@@ -389,13 +421,13 @@ class BaseDataset(Dataset):
             process_global_rank = torch.distributed.get_rank()
         self.py_logger.info(f"Loading total {len(self.data)} structures on "
                             f"device {process_global_rank}")
-        
+
         cnt_stats = self._get_init_cnt_stats()
         if self.fast_dev_run:
             self.data = self.data[:16]
         for i in tqdm(range(len(self.data))):
             res = self.load_structure(i, cnt_stats)
-            
+
             for k in res.keys():
                 self.data[i][k] = res[k]
             assert "pdb_id" in res
@@ -405,7 +437,7 @@ class BaseDataset(Dataset):
 
         self.py_logger.info(f"Processing all structures results in count "
                             f"statistics: {cnt_stats}")
-        
+
         bg_time = time.time()
         new_data = []
         for i in range(len(self.data)):
@@ -417,7 +449,7 @@ class BaseDataset(Dataset):
         self.py_logger.info(f"After loading structure filtering, original {len(self.data)} "
                             f"entries are reduced to {len(new_data)} entries.")
         self.data = new_data
-    
+
     def sanity_check(self):
         """Filter according to length
         """
@@ -445,18 +477,18 @@ class BaseDataset(Dataset):
         rr = residue_range
         if len(rr) == 1 and rr[0] == "":
             return np.arange(len(residue_index))
-        
+
         left = [eval(sep.split("-")[0]) for sep in rr]
         right = [eval(sep.split("-")[1]) for sep in rr]
-        rr_indices = [x for l, r in zip(left, right) for x in list(range(l, r+1))]
+        rr_indices = [x for l, r in zip(left, right) for x in list(range(l, r + 1))]
 
         selected_indices = []
         for i, ridx in enumerate(residue_index):
             if ridx in rr_indices:
                 selected_indices.append(i)
 
-        return selected_indices # a list
-    
+        return selected_indices  # a list
+
     def retrieve_pdb_path(self, pdb_id, chain_id):
         # specifically defined for ATLAS, PretrainPDB, CASP14 and CAMEO
         # Support base pointing to either the dataset root or the mmcif directory,
@@ -469,50 +501,89 @@ class BaseDataset(Dataset):
                 return c
         # Fallback to a reasonable default path for error messaging
         return cand1 if os.path.isdir(os.path.join(self.PDB_DATA_DIR, "mmcif_files")) else cand2
-    
+
     def _get_item_structural_tokens(self, index, skip_check=False):
-        
+
         item = self.data[index]
         if not skip_check:
             if "token_ids" in item:
                 if self.is_global_or_local == "local":
                     assert len(item["token_ids"]) == len(item[self.target_field])
                 return item["token_ids"], item[self.target_field], item["real_seqs"]
-    
+
         pdb_chain, residue_range = item["pdb_chain"], item["residue_range"]
         pdb_id, chain_id = item["pdb_id"], item["chain_id"]
         pdb_path = self.retrieve_pdb_path(pdb_id, chain_id)
-        
+
         if self.data_name == "AtlasDataset":
             chain_id = " "
         else:
-            # convert chain_id if necessary because some chain_id needs to 
+            # convert chain_id if necessary because some chain_id needs to
             # use use_author_field (specified in biotite).
-            # except atlas, other datasets' pdb_path is independent of chain_id; 
+            # except atlas, other datasets' pdb_path is independent of chain_id;
             # and for atlas, there is no need to transform chain_id
             try:
                 chain_id, is_changed = convert_chain_id(pdb_path, chain_id)
             except Exception as e:
-                self.py_logger.warning(f"Failed to convert chain_id for pdb_id: {pdb_id}, chain_id: {chain_id}. Skipping sample. Error: {e}")
-                return None # Return None to indicate this sample should be filtered out
+                self.py_logger.warning(
+                    f"Failed to convert chain_id for pdb_id: {pdb_id}, chain_id: {chain_id}. Skipping sample. Error: {e}")
+                return None  # Return None to indicate this sample should be filtered out
+            # If InterPro and chain id remapped, recompute labels on the remapped chain to avoid index mismatches
+            if (self.is_global_or_local == "local"
+                    and self.data_name == "InterProFunctionDataset"
+                    and 'is_changed' in locals() and is_changed):
+                try:
+                    new_pdb_chain = self.get_pdb_chain(pdb_id, chain_id)
+                except Exception:
+                    new_pdb_chain = None
+                if new_pdb_chain is None:
+                    try:
+                        self.py_logger.warning(
+                            f"InterPro: failed to reload remapped chain for pdb_id={pdb_id}, chain_id={chain_id}; skipping sample")
+                    except Exception:
+                        pass
+                    return None
+                # Recompute local labels from stored fragments (L-R over author residue indices)
+                local_label = None
+                try:
+                    fr = item.get("fragments", None)
+                    if isinstance(fr, str) and "-" in fr:
+                        parts = fr.split("-")
+                        Lb, Rb = eval(parts[0]), eval(parts[1])
+                        local_label = [1 if (ri >= Lb and ri <= Rb) else 0 for ri in new_pdb_chain.residue_index]
+                except Exception:
+                    local_label = None
+                if local_label is None:
+                    # fallback: keep previous labels but replace chain for indexing only
+                    prev = item.get(self.target_field, None)
+                    if isinstance(prev, list) and len(prev) == len(new_pdb_chain):
+                        local_label = prev
+                    else:
+                        local_label = [0] * len(new_pdb_chain)
+                # update item to the remapped chain context
+                item["pdb_chain"] = new_pdb_chain
+                item[self.target_field] = local_label
+                pdb_chain = new_pdb_chain
         assigned_labels = item[self.target_field]
         assert pdb_chain is not None
-        
+
         if self.is_global_or_local == "local":
             assert len(residue_range) == 1 and residue_range[0] == ""
-        
-            if self.data_name in "ProteinShakeBindingSiteDataset":
+
+            if self.data_name == "ProteinShakeBindingSiteDataset":
                 label_residue_index = item["residue_index"]
-            elif self.data_name in ["BioLIP2FunctionDataset", 
-                "InterProFunctionDataset", "ProteinGLUEEpitopeRegionDataset", 
-                "AtlasDataset"]:
+            elif self.data_name in [
+                "BioLIP2FunctionDataset",
+                "InterProFunctionDataset",
+                "ProteinGLUEEpitopeRegionDataset",
+                "AtlasDataset",
+            ]:
                 # all local labels already aligned to pdb_chain.residue_index
                 label_residue_index = pdb_chain.residue_index
             else:
                 raise NotImplementedError
-            
-            assert len(assigned_labels) == len(label_residue_index)
 
+            assert len(assigned_labels) == len(label_residue_index)
 
         # encode protein structure into token_ids without importing tokenizer classes here
         tok_name = getattr(self.tokenizer.__class__, "__name__", "")
@@ -538,31 +609,63 @@ class BaseDataset(Dataset):
             token_ids, residue_index, seqs = self.tokenizer.encode_structure(
                 pdb_path, chain_id, self.use_sequence
             )
+        elif isinstance(self.tokenizer, WrappedMyRepProteinGLUETokenizer):
+            # Continuous representation for ProteinGLUE tasks (same API)
+            token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                pdb_path, chain_id, self.use_sequence
+            )
+        elif (WrappedMyRepAtlasTokenizer is not None) and isinstance(self.tokenizer, WrappedMyRepAtlasTokenizer):
+            # Continuous representation for ATLAS tasks
+            token_ids, residue_index, seqs = self.tokenizer.encode_structure(
+                pdb_path, chain_id, self.use_sequence
+            )
         else:
-            raise NotImplementedError
+            # Generic fallback: any tokenizer exposing encode_structure
+            enc = getattr(self.tokenizer, "encode_structure", None)
+            if callable(enc):
+                import inspect
+                try:
+                    sig = inspect.signature(enc)
+                    nargs = len(sig.parameters)
+                except Exception:
+                    nargs = 3
+                try:
+                    if nargs <= 2:
+                        token_ids, residue_index, seqs = enc(pdb_path, chain_id)
+                    else:
+                        token_ids, residue_index, seqs = enc(pdb_path, chain_id, self.use_sequence)
+                except TypeError:
+                    # As a last resort, try without use_sequence
+                    token_ids, residue_index, seqs = enc(pdb_path, chain_id)
+            else:
+                raise NotImplementedError
 
         assert len(token_ids) == len(residue_index)
         # code compatability in case token_ids store continuous reprs
         token_ids = token_ids.detach()
         assert len(residue_index) == len(seqs)
-        
+
         if self.is_global_or_local == "local":
             # align residue_index and label_residue_index, so that token_ids align with assigned_labels
             org_len = len(token_ids)
+            residue_index_orig_len = len(residue_index)
             align_indices_1 = [i for i, x in enumerate(label_residue_index) if x in residue_index]
             label_residue_index = np.array(label_residue_index)[align_indices_1].tolist()
             assigned_labels = np.array(assigned_labels)[align_indices_1].tolist()
 
             align_indices_2 = [i for i, x in enumerate(residue_index) if x in label_residue_index]
             residue_index, token_ids = residue_index[align_indices_2], token_ids[align_indices_2]
-            seqs = [x for i,x in enumerate(seqs) if i in set(align_indices_2)]
+            seqs = [x for i, x in enumerate(seqs) if i in set(align_indices_2)]
 
-            try:
-                assert (residue_index == np.array(label_residue_index)).all()
-            except:
+            # Ensure exact 1:1 correspondence; avoid NumPy broadcasting pitfalls
+            need_align = (
+                len(residue_index) != len(label_residue_index)
+                or not np.array_equal(residue_index, np.array(label_residue_index))
+            )
+            if need_align:
                 # deal with repeated residue indices and achieve exact match with alignment
                 idx_list = list(set(residue_index.tolist() + label_residue_index))
-                
+
                 alphabet = Alphabet(idx_list)
                 # SubstitutionMatrix requires an integer ndarray; ensure dtype explicitly
                 sim_score = np.eye(len(idx_list), dtype=np.int32)
@@ -570,7 +673,7 @@ class BaseDataset(Dataset):
                 seq1 = GeneralSequence(alphabet, label_residue_index)
                 seq2 = GeneralSequence(alphabet, residue_index.tolist())
                 alignment = align_optimal(seq1, seq2, substitution_matrix)
-                
+
                 alignment = alignment[0].trace
                 align_indices_1, align_indices_2 = [], []
                 for i in range(len(alignment)):
@@ -581,25 +684,72 @@ class BaseDataset(Dataset):
                 label_residue_index = np.array(label_residue_index)[align_indices_1].tolist()
                 assigned_labels = np.array(assigned_labels)[align_indices_1].tolist()
                 residue_index, token_ids = residue_index[align_indices_2], token_ids[align_indices_2]
-                seqs = [x for i,x in enumerate(seqs) if i in set(align_indices_2)]
+                seqs = [x for i, x in enumerate(seqs) if i in set(align_indices_2)]
+
+                # Final sanity: enforce equal lengths after alignment
+                if not (len(residue_index) == len(label_residue_index) == len(assigned_labels)):
+                    try:
+                        self.py_logger.warning(
+                            f"Post-alignment length mismatch for pdb_id={pdb_id}, chain_id={chain_id}; skipping sample"
+                        )
+                    except Exception:
+                        pass
+                    return None
 
             # If alignment produced an empty sequence, skip this sample gracefully
             if len(token_ids) == 0:
+                # Gather extra debug info from tokenizer and structure
+                h5_dbg = None
                 try:
-                    self.py_logger.warning(f"Empty alignment for pdb_id={pdb_id}, chain_id={chain_id}; skipping sample")
+                    if hasattr(self.tokenizer, "get_last_debug_info"):
+                        h5_dbg = self.tokenizer.get_last_debug_info()
+                except Exception:
+                    h5_dbg = None
+                pc_len = None
+                try:
+                    pc_len = len(pdb_chain.residue_index)
+                except Exception:
+                    pc_len = None
+
+                try:
+                    print('*********************888888888888888888888888skipping sample*********************')
+                    msg = (
+                        f"Empty alignment; skipping | pdb_id={pdb_id} chain_id={chain_id} "
+                        f"org_len={org_len} resid_len_before={residue_index_orig_len} pc_len={pc_len} "
+                        f"label_idx_len={len(label_residue_index)} labels_len={len(assigned_labels)} "
+                        f"h5_raw_len={(h5_dbg or {}).get('h5_raw_len')} "
+                        f"h5_after_zero_len={(h5_dbg or {}).get('h5_after_zero_len')} "
+                        f"h5_idx_raw_len={(h5_dbg or {}).get('h5_idx_raw_len')} "
+                        f"h5_key={(h5_dbg or {}).get('h5_key')} "
+                        f"pdb_path={pdb_path}"
+                    )
+                    self.py_logger.warning(msg)
+                except Exception:
+                    pass
+                try:
+                    print('*********************888888888888888888888888skipping sample*********************')
+                    print(
+                        f"[EmptyAlignment] pdb_id={pdb_id} chain_id={chain_id} "
+                        f"org_len={org_len} resid_len_before={residue_index_orig_len} pc_len={pc_len} "
+                        f"label_idx_len={len(label_residue_index)} labels_len={len(assigned_labels)} "
+                        f"h5_raw_len={(h5_dbg or {}).get('h5_raw_len')} h5_after_zero_len={(h5_dbg or {}).get('h5_after_zero_len')} "
+                        f"h5_idx_raw_len={(h5_dbg or {}).get('h5_idx_raw_len')} h5_key={(h5_dbg or {}).get('h5_key')} "
+                        f"pdb_path={pdb_path}"
+                    )
                 except Exception:
                     pass
                 return None
 
             # if org_len - len(token_ids) != 0:
-                # print(">> residue reduced by : ", org_len - len(token_ids))
+            # print(">> residue reduced by : ", org_len - len(token_ids))
 
         # select according to residue range constraints for some global tasks
         selected_indices = self._get_selected_indices(residue_index, residue_range)
         # If nothing falls within the selected range, skip this sample instead of asserting
         if len(selected_indices) == 0:
             try:
-                self.py_logger.warning(f"No residues selected after range filtering for pdb_id={pdb_id}, chain_id={chain_id}, range={residue_range}; skipping sample")
+                self.py_logger.warning(
+                    f"No residues selected after range filtering for pdb_id={pdb_id}, chain_id={chain_id}, range={residue_range}; skipping sample")
             except Exception:
                 pass
             return None
@@ -615,7 +765,7 @@ class BaseDataset(Dataset):
         self.data[index]["real_seqs"] = seqs
         if self.is_global_or_local == "local":
             assert len(token_ids) == len(assigned_labels)
-        return token_ids, assigned_labels, seqs # torch.Tensor, List
+        return token_ids, assigned_labels, seqs  # torch.Tensor, List
 
     def __getitem__(self, index: int):
         return self._get_item_structural_tokens(index)
@@ -630,7 +780,7 @@ class BaseDataset(Dataset):
             """
 
             labels_to_filter = set([
-                22, 36, 47, 51, 73, 77, 78, 84, 88, 90, 126, 153, 176, 295, 
+                22, 36, 47, 51, 73, 77, 78, 84, 88, 90, 126, 153, 176, 295,
                 0, 3, 21, 39, 45, 59, 70, 97, 179,
                 26, 49, 60, 81, 95, 113, 124, 133, 143, 178,
                 13, 14, 18, 42, 52, 56, 61, 91, 132, 135, 180, 246
@@ -652,16 +802,16 @@ class BaseDataset(Dataset):
                 if self.data[i]["pdb_id"] != "1ldt":
                     new_data.append(self.data[i])
             self.data = new_data
-        
+
     def additional_preprocessing_for_TAPE_homo(self, tokenizer_name):
         pass
 
     def splitting_dataset(
-        self,
-        fold_split_ratio: float = 0.2,
-        fold_valid_ratio: float = 0.1,
-        superfamily_split_ratio: float = 0.2,
-        superfamily_valid_ratio: float = 0.1,
+            self,
+            fold_split_ratio: float = 0.2,
+            fold_valid_ratio: float = 0.1,
+            superfamily_split_ratio: float = 0.2,
+            superfamily_valid_ratio: float = 0.1,
     ):
         """
         Create four splits: train, validation, fold_test, superfamily_test.

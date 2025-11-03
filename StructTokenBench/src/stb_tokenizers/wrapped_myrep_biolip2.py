@@ -159,6 +159,39 @@ class WrappedMyRepBioLIP2Tokenizer:
 
         # 1) Try to fetch features from H5 if available
         arr, idx = self._read_from_h5(pdb_id, chain_up)
+        # If we have H5 arrays, drop rows with idx == -1 and rows whose embeddings are all zeros
+        if arr is not None:
+            if arr.ndim == 1:
+                arr = arr[None, :]
+            # Normalize idx to int array if present
+            if idx is not None:
+                try:
+                    idx = np.asarray(idx).astype(int)
+                except Exception:
+                    idx = None
+            try:
+                row_nonzero = ~np.all(arr == 0, axis=-1)
+            except Exception:
+                row_nonzero = np.ones((arr.shape[0],), dtype=bool)
+            if idx is not None and hasattr(idx, "shape") and idx.shape[0] == arr.shape[0]:
+                mask = (idx != -1) & row_nonzero
+            else:
+                mask = row_nonzero
+            try:
+                arr = arr[mask]
+                if idx is not None and hasattr(idx, "shape") and idx.shape[0] == mask.shape[0]:
+                    # unlikely path; keep for safety
+                    pass
+                elif idx is not None and hasattr(idx, "shape"):
+                    # Typical path when idx matches pre-filter length
+                    if idx.shape[0] == row_nonzero.shape[0]:
+                        idx = idx[mask]
+                    else:
+                        # leave idx as-is if shapes don't match expectations
+                        pass
+            except Exception:
+                # If anything goes wrong, fall back to original arrays
+                pass
 
         # 2) Load structure to determine length and residue numbering
         try:

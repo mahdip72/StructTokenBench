@@ -34,16 +34,16 @@ class InterProFunctionDataset(BaseDataset):
     }
 
     SAVE_SPLIT = ["train", "validation", "fold_test", "superfamily_test"]
-    
+
     def __init__(self, *args, **kwargs):
         BaseDataset.__init__(self, *args, **kwargs)
-    
+
     def __getitem__(self, index: int):
         return BaseDataset.__getitem__(self, index)
-    
-    def get_target_file_name(self,):
+
+    def get_target_file_name(self, ):
         return os.path.join(self.data_path, f"interpro/processed_structured_{self.target_field}_{self.split}")
-    
+
     def parse_ipr2pdb(self, report_every_n=100000):
 
         INTERPRO_TYPES = ["PTM", "Conserved_site", "Repeat", "Active_site", "Binding_site"]
@@ -51,7 +51,7 @@ class InterProFunctionDataset(BaseDataset):
             interpro_type: defaultdict(int) for interpro_type in INTERPRO_TYPES
         }
 
-        # for each entry type, how many proteins 
+        # for each entry type, how many proteins
         def handle_ipr_entry(elem):
             # Used for parsing `interpro.xml`
             ipr_entries_ = []
@@ -64,7 +64,7 @@ class InterProFunctionDataset(BaseDataset):
             pdb_pointer = elem.find("structure_db_links")
             if pdb_pointer is None:
                 return ipr_entries_
-            
+
             for child in pdb_pointer:
                 # skip <taxonomy_distribution> section
                 assert child.attrib["db"] == "PDB"
@@ -95,7 +95,7 @@ class InterProFunctionDataset(BaseDataset):
                 time_used = time.time() - start_time
                 print(f'Processed {n_records_processed} records; total time used: {time_used} (secs)')
 
-        self.ipr2pdb_list = ipr_entries # (ipr_id, ipr_type, pdb_id)
+        self.ipr2pdb_list = ipr_entries  # (ipr_id, ipr_type, pdb_id)
 
     def parse_pdb_uniprot_id_mapping(self, ):
 
@@ -126,13 +126,13 @@ class InterProFunctionDataset(BaseDataset):
                     continue_flag = False
 
         cnt = {}
-        for x,y in pdb2uniprot_list:
+        for x, y in pdb2uniprot_list:
             if y not in cnt:
                 cnt[y] = [x]
             else:
                 cnt[y].append(x)
         self.uniprot2pdb_multi_mapping = cnt
-    
+
     def parse_ipr_id2types(self, ):
         """Load all IPR entries
         """
@@ -151,7 +151,7 @@ class InterProFunctionDataset(BaseDataset):
         self.data = []
         for i in range(len(annot_df)):
             item = annot_df.iloc[i]
-            fragments = item["residue_fragments"][:-2] # remove "-S" at the end
+            fragments = item["residue_fragments"][:-2]  # remove "-S" at the end
             if item["uniprot_id"] not in self.uniprot2pdb_multi_mapping:
                 continue
             for pdb_id in self.uniprot2pdb_multi_mapping[item["uniprot_id"]]:
@@ -162,7 +162,7 @@ class InterProFunctionDataset(BaseDataset):
                     "ipr_type": item["ipr_type"],
                     "fragments": fragments,
                 })
-    
+
     def associate_with_CATH_labels(self, ):
         """Associate with CATH labels
         """
@@ -171,13 +171,13 @@ class InterProFunctionDataset(BaseDataset):
             "./data/CATH"
         )
         self.cath_database = CATHLabelMappingDataset(data_path=cath_data_path)
-    
+
         for i in tqdm(range(len(self.data))):
             pdb_id = self.data[i]["pdb_id"]
-            chain_id = str(None) # no chain_id provided
+            chain_id = str(None)  # no chain_id provided
             ref_seq = ""
             res = self.cath_database.retrieve_labels(pdb_id, chain_id, ref_seq)
-            # None: either cannot find PDB and its chain, 
+            # None: either cannot find PDB and its chain,
             # or fail to do multi-sequence alignment
             if res is None:
                 self.data[i] = None
@@ -189,11 +189,10 @@ class InterProFunctionDataset(BaseDataset):
         self.py_logger.info(f"After filtering, original {len(self.data)} "
                             f"entries are reduced to {len(new_data)} entries.")
         self.data = new_data
-    
 
     def process_data_from_scratch(self, *args, **kwargs):
         assert dist.get_world_size() == 1, "dataset not preprocessed and splitted, please not to use multi-GPU training"
-        
+
         self.extract_useful_features()
         self.associate_with_CATH_labels()
 
@@ -220,8 +219,8 @@ class InterProFunctionDataset(BaseDataset):
         self.py_logger.info(f"After filtering missing labels for {self.target_field}, {len(self.data)} "
                             f"entries are reduced to {len(new_data)} entries.")
         self.data = new_data
-    
-    def _get_init_cnt_stats(self,):
+
+    def _get_init_cnt_stats(self, ):
         cnt_stats = {
             "cnt_return_none": 0,
             "cnt_wrong_chain": 0,
@@ -230,7 +229,7 @@ class InterProFunctionDataset(BaseDataset):
             "cnt_no_entity_key": 0
         }
         return cnt_stats
-        
+
     def load_structure(self, idx, cnt_stats):
         """Given pdb_id, chain_id
         """
@@ -262,11 +261,10 @@ class InterProFunctionDataset(BaseDataset):
             return self.NONE_RETURN_LOAD_STRUCTURE
 
         ret = {
-            "pdb_id": pdb_id, 
+            "pdb_id": pdb_id,
             "chain_id": chain_id,
             "residue_range": residue_range,
-            "pdb_chain": pdb_chain, 
+            "pdb_chain": pdb_chain,
             self.target_field: local_label
         }
         return ret
-    
