@@ -14,7 +14,8 @@ import safetensors
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.trainer_pt_utils import get_parameter_names
-from transformers import AutoConfig, AdamW, EsmModel
+from transformers import AutoConfig, EsmModel
+from torch.optim import AdamW
 from torch.optim import Adam
 import torch.nn.functional as F
 import deepspeed
@@ -29,6 +30,7 @@ from util import accuracy, get_optimizer, calculate_regression_metric, calculate
     calculate_multiclass_clf_metric
 from modeling_util import model_init_fn
 from vqvae.quantizer_module import get_codebook_utility
+from stb_debug_utils import maybe_log_first_batch_debug, log_every_batch_debug
 
 
 class SequenceClassificationHead(nn.Module):
@@ -59,7 +61,6 @@ class SequenceClassificationHead(nn.Module):
 class ProceedingBaseModel(nn.Module):
     # src/model_module.py
 
-    import torch
 
     def inference_feature(self, input_list):
         """
@@ -389,8 +390,13 @@ class SequenceClassificationModel(ProceedingBaseModel):
                     self.input_proj = nn.Linear(feat_dim, self.d_model, bias=False).to(feature.device)
                 feature = self.input_proj(feature)
 
-        # ensure targets are long class indices for global tasks; local will handle float later
-        targets = targets.long()
+        # Ensure target dtype matches task type
+        # - Global classification: integer class indices
+        # - Local regression/classification: keep float for regression; classification handled downstream
+        if self.is_global_or_local == "global" and not self.regression:
+            targets = targets.long()
+        else:
+            targets = targets.to(torch.float32)
 
         # Only enforce label range for GLOBAL multi-class classification.
         if self.is_global_or_local == "global":
@@ -821,6 +827,9 @@ class PlModel(pl.LightningModule):
             opt_ret["num_sequences"] = num_sequences
 
         logits, targets = outputs[1], outputs[2]
+        # Debug prints: once on first batch, and light per-batch stats for all batches
+        maybe_log_first_batch_debug(self, batch, logits, targets, prefix=split, batch_idx=batch_idx)
+        log_every_batch_debug(self, batch, logits, targets, prefix=split, batch_idx=batch_idx)
         return {
             f"{split}_loss": loss,
             **metrics_for_return,

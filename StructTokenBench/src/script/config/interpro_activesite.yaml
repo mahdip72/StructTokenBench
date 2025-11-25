@@ -1,0 +1,46 @@
+defaults:
+    - _self_
+    - trainer: base
+    - lightning: base
+    - data: interpro_activesite
+    - optimization: base
+    - autorestart: base
+model:
+    class_name: "SequenceClassificationModel"
+    pretrained_ckpt_path: ""
+    ckpt_path: null
+    num_labels: 1
+    dropout: 0.1
+    num_layer: 1
+    hidden_size: 512
+    num_tokens: null
+    d_model: null
+    is_global_or_local: local
+    multi_label: false
+    regression: false
+    use_sequence: false
+    sequence_only: false
+    add_noise: null
+deepspeed_path: src/script/config/deepspeed/32_stage2.json
+default_data_dir: null
+tokenizer: null
+tokenizer_pretrained_ckpt_path: null
+tokenizer_ckpt_name: null
+max_steps: 10000
+experiment_name: test
+run_name: test_run
+validate_only: false
+test_only: false
+
+save_dir_path: ""
+tokenizer_device: "cuda"
+precompute_tokens: true
+quantizer_use_linear_project: false
+model_encoder_dmodel: 1024
+model_encoder_nlayers: 2
+model_encoder_vheads: 128
+quantizer_codebook_size: 4096
+quantizer_codebook_embed_size: 128
+model_encoder_dout: 128
+
+

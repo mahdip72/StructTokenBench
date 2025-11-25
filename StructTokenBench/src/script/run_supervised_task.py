@@ -26,6 +26,7 @@ for name in all_baseline_names:
 sys.path.append(exc_dir_baseline)
 
 import data_module
+import model_module
 from util import setup_loggings
 
 def setup_trainer(cfg):

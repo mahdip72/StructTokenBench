@@ -116,7 +116,7 @@ def load_class(qualname: str):
             return getattr(import_module(mod), cls)
         except Exception:
             # Fallbacks: try src.stb_tokenizers then top-level stb_tokenizers
-            for alt in ("src.stb_tokenizers", "stb_tokenizers"):
+            for alt in ("src.stb_tokenizers", "stb_tokenizers", "src.tokenizer", "tokenizer"):
                 try:
                     return getattr(import_module(alt), cls)
                 except Exception:
@@ -144,7 +144,7 @@ def load_class(qualname: str):
                 pass
             raise
     # bare name -> try src.stb_tokenizers.<Name>, then stb_tokenizers.<Name>
-    for mod in ("src.stb_tokenizers", "stb_tokenizers"):
+    for mod in ("src.stb_tokenizers", "stb_tokenizers", "src.tokenizer", "tokenizer"):
         try:
             return getattr(import_module(mod), qualname)
         except Exception:
@@ -380,10 +380,47 @@ class ProteinDataModule(pl.LightningDataModule):
             if not is_continuous:
                 # Discrete: keep the original checks that rely on token_ids
                 for i in tqdm(range(len(dataset.data))):
-                    if "real_seqs" not in dataset.data[i] or dataset.data[i]["real_seqs"] is None:
-                        L = len(dataset.data[i]["token_ids"])
-                        dataset.data[i]["real_seqs"] = ["X"] * L
-                    assert len(dataset.data[i]["real_seqs"]) == len(dataset.data[i]["token_ids"])
+                    item = dataset.data[i]
+                    if "real_seqs" not in item or item["real_seqs"] is None:
+                        # Prefer token length when token_ids already exist (e.g., after precompute).
+                        # Otherwise, fall back to structure length to create a placeholder; exact
+                        # equality will be enforced later when token_ids are materialized.
+                        try:
+                            L = len(item.get("token_ids", []))
+                        except Exception:
+                            L = 0
+                        if not L:
+                            try:
+                                pc = item.get("pdb_chain", None)
+                                if pc is not None and getattr(pc, "sequence", None) is not None:
+                                    L = len(pc.sequence)
+                            except Exception:
+                                L = 0
+                        item["real_seqs"] = ["X"] * int(L)
+                    # Only check equality when token_ids are already present
+                    if "token_ids" in item:
+                        assert len(item["real_seqs"]) == len(item["token_ids"])
+                for i in tqdm(range(len(dataset.data))):
+                    item = dataset.data[i]
+                    if "real_seqs" not in item or item["real_seqs"] is None:
+                        # Prefer token length when token_ids already exist (e.g., after precompute).
+                        # Otherwise, fall back to structure length to create a placeholder; exact
+                        # equality will be enforced later when token_ids are materialized.
+                        try:
+                            L = len(item.get("token_ids", []))
+                        except Exception:
+                            L = 0
+                        if not L:
+                            try:
+                                pc = item.get("pdb_chain", None)
+                                if pc is not None and getattr(pc, "sequence", None) is not None:
+                                    L = len(pc.sequence)
+                            except Exception:
+                                L = 0
+                        item["real_seqs"] = ["X"] * int(L)
+                    # Only check equality when token_ids are already present
+                    if "token_ids" in item:
+                        assert len(item["real_seqs"]) == len(item["token_ids"])
             else:
                 # Continuous: do NOT touch token_ids. If some downstream code expects
                 # 'real_seqs' to exist, give a cheap placeholder (empty list).

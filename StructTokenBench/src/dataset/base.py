@@ -294,19 +294,29 @@ class BaseDataset(Dataset):
         if len(normed) == 0:
             return None
 
-        # pad
-        lengths = [int(x["token_ids"].shape[0]) for x in normed]
-        Lmax = max(lengths)
-        # Support mixed feature dims (e.g., 128 vs 256) by padding to the max dim in the batch
-        dims = [int(it["token_ids"].shape[1]) for it in normed]
-        Dmax = max(dims)
-        Dmin = min(dims)
-        B = len(normed)
+        # Determine whether batch carries discrete ids (1D per sample) or continuous features (2D per sample)
+        first_tok = normed[0]["token_ids"]
+        if not torch.is_tensor(first_tok):
+            first_tok = torch.as_tensor(first_tok)
+        is_discrete = (first_tok.ndim == 1)
 
-        feats = torch.zeros((B, Lmax, Dmax), dtype=torch.float32)
+        # pad
+        lengths = [int(torch.as_tensor(it["token_ids"]).shape[0]) for it in normed]
+        Lmax = max(lengths)
+        B = len(normed)
         # attention mask semantics: True = padding, False = real token
         attn = torch.ones((B, Lmax), dtype=torch.bool)
         resid = torch.zeros((B, Lmax), dtype=torch.int32)
+
+        if is_discrete:
+            # 1D integer token ids per sample -> produce (B, Lmax) long tensor
+            feats = torch.zeros((B, Lmax), dtype=torch.long)
+        else:
+            # 2D float features per sample -> produce (B, Lmax, Dmax) float tensor
+            dims = [int(torch.as_tensor(it["token_ids"]).shape[1]) for it in normed]
+            Dmax = max(dims)
+            Dmin = min(dims)
+            feats = torch.zeros((B, Lmax, Dmax), dtype=torch.float32)
 
         # Detect local vs global labels by inspecting first item's label
         first_label = normed[0].get("label", 0)
@@ -316,9 +326,9 @@ class BaseDataset(Dataset):
             head = first_label[:10] if isinstance(first_label, (list, tuple)) else (
                 first_label.detach().cpu().numpy()[:10].tolist() if torch.is_tensor(
                     first_label) and first_label.ndim > 0 else first_label)
-            print(
-                f"[DEBUG][collate_fn] detected is_local={is_local}, first_label_type={type(first_label)}, head={head}")
-            if Dmin != Dmax:
+            # print(
+                # f"[DEBUG][collate_fn] detected is_local={is_local}, first_label_type={type(first_label)}, head={head}")
+            if not is_discrete and Dmin != Dmax:
                 print(f"[WARN][collate_fn] Mixed embedding dims in batch: min={Dmin}, max={Dmax}. Padding smaller dims with zeros.")
         except Exception:
             pass
@@ -329,10 +339,16 @@ class BaseDataset(Dataset):
             targets = torch.zeros((B,), dtype=torch.long)
 
         for i, it in enumerate(normed):
-            x = it["token_ids"]
-            L = x.shape[0]
-            # Copy features; if x has smaller dim, place in the leading slice and leave the rest zeros
-            feats[i, :L, :x.shape[1]] = x
+            xt = it["token_ids"]
+            xt = torch.as_tensor(xt)
+            L = int(xt.shape[0])
+            if is_discrete:
+                xt = xt.to(torch.long).view(-1)  # (L,)
+                feats[i, :L] = xt
+            else:
+                xt = xt.to(torch.float32)
+                # Copy features; if x has smaller dim, place in the leading slice and leave the rest zeros
+                feats[i, :L, :xt.shape[1]] = xt
             attn[i, :L] = False
             if "residue_index" in it and it["residue_index"] is not None:
                 ri = it["residue_index"]
@@ -351,11 +367,18 @@ class BaseDataset(Dataset):
 
         lengths = torch.as_tensor(lengths, dtype=torch.int32)
 
-        input_list = [{
-            "token_ids": feats,
-            "attention_mask": attn,
-            "residue_index": resid,
-        }]
+        if is_discrete:
+            input_list = [{
+                "token_ids": feats,           # (B, Lmax) long
+                "attention_mask": attn,       # (B, Lmax) bool
+                "residue_index": resid,       # (B, Lmax) int
+            }]
+        else:
+            input_list = [{
+                "token_ids": feats,           # (B, Lmax, Dmax) float
+                "attention_mask": attn,       # (B, Lmax) bool
+                "residue_index": resid,       # (B, Lmax) int
+            }]
         out = {
             "input_list": input_list,
             "targets": targets,

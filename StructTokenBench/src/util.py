@@ -15,7 +15,8 @@ import safetensors
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
 from transformers.trainer_pt_utils import get_parameter_names
-from transformers import AutoConfig, AdamW, EsmModel
+from transformers import AutoConfig, EsmModel
+from torch.optim import AdamW
 from torch.optim import Adam
 import torch.nn.functional as F
 import deepspeed
