@@ -23,7 +23,9 @@ All mmcif files were downloaded and can access in Ada server: ```/mnt/hdd8/farza
 Using the following command: 
 
 all struct_token_bench_release_data were downloaded and modified based on each task,
-no need to re-download them again
+no need to re-download them again.
+
+you can copy directory from ```/mnt/hdd8/farzaneh/projects/PST/struct_token_bench_release_data```  
 
 
 
