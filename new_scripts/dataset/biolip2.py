@@ -51,6 +51,7 @@ class BioLIP2FunctionDataset(Dataset):
         tokenizer,
         logger=None,
         cache=True,
+        filter_length=600,
     ):
         self.data_path = data_path
         self.split = split
@@ -59,6 +60,7 @@ class BioLIP2FunctionDataset(Dataset):
         self.tokenizer = tokenizer
         self.logger = logger
         self.cache = bool(cache)
+        self.filter_length = int(filter_length) if filter_length is not None else None
         self._cache = {}
 
         raw_file = os.path.join(
@@ -106,6 +108,12 @@ class BioLIP2FunctionDataset(Dataset):
             return None
         except Exception:
             return None
+        if self.filter_length is not None:
+            try:
+                if int(token_ids.shape[0]) > self.filter_length:
+                    return None
+            except Exception:
+                return None
 
         token_res_idx = np.asarray(token_res_idx)
         if token_res_idx.size == 0:

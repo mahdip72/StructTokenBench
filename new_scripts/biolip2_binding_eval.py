@@ -2,6 +2,7 @@
 import argparse
 import copy
 import logging
+import math
 import random
 
 import numpy as np
@@ -9,9 +10,44 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from torchmetrics.classification import AUROC
 
 from dataset.biolip2 import BioLIP2FunctionDataset
 from dataset.tokenizer_biolip2 import WrappedMyRepBioLIP2Tokenizer
+
+
+class MLPHead(nn.Module):
+    def __init__(self, in_dim, hid_dim, out_dim, num_layer=1, dropout=0.0):
+        super().__init__()
+        dims = [in_dim] + [hid_dim] * num_layer + [out_dim]
+        layers = []
+        for i in range(num_layer + 1):
+            layers.append(nn.Linear(dims[i], dims[i + 1]))
+            if i < num_layer:
+                layers.append(nn.ReLU())
+                if dropout > 0:
+                    layers.append(nn.Dropout(dropout))
+        self.classify = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.classify(x)
+
+
+class BindingPredictor(nn.Module):
+    def __init__(self, embed_dim, d_model, hidden_size, num_layer, dropout):
+        super().__init__()
+        if d_model is None:
+            d_model = embed_dim
+        self.d_model = int(d_model)
+        self.proj = None
+        if embed_dim != self.d_model:
+            self.proj = nn.Linear(embed_dim, self.d_model, bias=False)
+        self.head = MLPHead(self.d_model, hidden_size, 1, num_layer=num_layer, dropout=dropout)
+
+    def forward(self, x):
+        if self.proj is not None:
+            x = self.proj(x)
+        return self.head(x)
 
 
 def seed_all(seed: int) -> None:
@@ -22,24 +58,30 @@ def seed_all(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
-def binary_auroc(scores: np.ndarray, targets: np.ndarray) -> float:
-    scores = np.asarray(scores).reshape(-1)
-    targets = np.asarray(targets).astype(np.int64).reshape(-1)
-    if scores.size == 0:
-        return float("nan")
-    pos = targets.sum()
-    neg = targets.size - pos
-    if pos == 0 or neg == 0:
-        return float("nan")
-    order = np.argsort(scores)[::-1]
-    y = targets[order]
-    tps = np.cumsum(y)
-    fps = np.cumsum(1 - y)
-    tpr = tps / pos
-    fpr = fps / neg
-    tpr = np.concatenate([[0.0], tpr])
-    fpr = np.concatenate([[0.0], fpr])
-    return float(np.trapz(tpr, fpr))
+def get_cosine_schedule_with_warmup(
+    optimizer,
+    num_warmup_steps,
+    num_training_steps,
+    num_cycles=0.5,
+    last_epoch=-1,
+    min_ratio=0.1,
+    plateau_ratio=0.1,
+):
+    def lr_lambda(current_step):
+        plateau_steps = int(plateau_ratio * num_training_steps)
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        if current_step < num_warmup_steps + plateau_steps:
+            return 1.0
+        progress = float(current_step - num_warmup_steps - plateau_steps) / float(
+            max(1, num_training_steps - num_warmup_steps - plateau_steps)
+        )
+        return max(
+            min_ratio,
+            0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)),
+        )
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
 def build_dataset(split: str, args, tokenizer, logger):
@@ -52,6 +94,7 @@ def build_dataset(split: str, args, tokenizer, logger):
         tokenizer=tokenizer,
         logger=logger,
         cache=True,
+        filter_length=args.filter_length,
     )
     logger.info(f"[data] dataset split={split} size={len(ds)}")
     return ds
@@ -116,8 +159,9 @@ def train_one_epoch(model, loader, optimizer, device, show_progress=False):
 @torch.no_grad()
 def eval_auroc(model, loader, device, show_progress=False, desc="eval"):
     model.eval()
-    all_scores = []
-    all_targets = []
+    metric = AUROC(task="binary").to(device)
+    total = 0
+    pos = 0
     for batch in _iter_with_progress(loader, show_progress, desc=desc):
         if batch is None:
             continue
@@ -127,15 +171,14 @@ def eval_auroc(model, loader, device, show_progress=False, desc="eval"):
         if mask.sum() == 0:
             continue
         logits = model(feats).squeeze(-1)
-        scores = torch.sigmoid(logits[mask]).detach().cpu().numpy()
-        labs = targets[mask].detach().cpu().numpy()
-        all_scores.append(scores)
-        all_targets.append(labs)
-    if not all_scores:
+        scores = torch.sigmoid(logits[mask])
+        labs = targets[mask]
+        total += int(labs.numel())
+        pos += int(labs.sum().item())
+        metric.update(scores, labs.to(torch.int64))
+    if total == 0 or pos == 0 or pos == total:
         return float("nan")
-    scores = np.concatenate(all_scores, axis=0)
-    targets = np.concatenate(all_targets, axis=0)
-    return binary_auroc(scores, targets)
+    return float(metric.compute().detach().cpu().item())
 
 
 def parse_args():
@@ -165,6 +208,14 @@ def parse_args():
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--filter-length", type=int, default=600)
+    p.add_argument("--hidden-size", type=int, default=512)
+    p.add_argument("--num-layer", type=int, default=1)
+    p.add_argument("--dropout", type=float, default=0.1)
+    p.add_argument("--d-model", type=int, default=None)
+    p.add_argument("--warmup-steps", type=int, default=200)
+    p.add_argument("--min-lr-ratio", type=float, default=0.1)
+    p.add_argument("--plateau-ratio", type=float, default=0.1)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--tokenizer-device", default="cpu")
     p.add_argument("--progress", action="store_true", help="Show tqdm progress bars")
@@ -207,14 +258,22 @@ def main():
     if sample_dim is None:
         raise RuntimeError("No valid samples in training set.")
     embed_dim = sample_dim
-    model = nn.Linear(embed_dim, 1).to(device)
+    model = BindingPredictor(
+        embed_dim=embed_dim,
+        d_model=args.d_model,
+        hidden_size=args.hidden_size,
+        num_layer=args.num_layer,
+        dropout=args.dropout,
+    ).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     total_steps = max(1, args.epochs * len(train_loader))
-    min_factor = 0.1  # final lr = lr * 1/10
-    def lr_lambda(step):
-        frac = min(step / total_steps, 1.0)
-        return 1.0 - frac * (1.0 - min_factor)
-    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=args.warmup_steps,
+        num_training_steps=total_steps,
+        min_ratio=args.min_lr_ratio,
+        plateau_ratio=args.plateau_ratio,
+    )
 
     logger.info("[train] start")
     best_state = None
