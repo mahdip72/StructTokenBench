@@ -19,16 +19,12 @@ class WrappedMyRepBioLIP2Tokenizer:
         embed_dim=128,
         fallback_to_any_chain=False,
         skip_on_missing=True,
-        pdb_data_dir=None,
-        fallback_to_structure=False,
         device="cpu",
     ):
         self.device = device
         self.embed_dim = int(embed_dim)
         self.fallback = bool(fallback_to_any_chain)
         self.skip_on_missing = bool(skip_on_missing)
-        self.pdb_data_dir = pdb_data_dir
-        self.fallback_to_structure = bool(fallback_to_structure)
         self._last_debug = {}
 
         if not h5_path:
@@ -79,10 +75,16 @@ class WrappedMyRepBioLIP2Tokenizer:
         cands = []
         for b in bases:
             if chain_up:
+                chain_low = chain_up.lower()
                 cands += [
                     f"{b}_chain_id_{chain_up}",
+                    f"{b}_CHAIN_ID_{chain_up}",
+                    f"{b}_chain_id_{chain_low}",
+                    f"{b}_CHAIN_ID_{chain_low}",
                     f"{b}_{chain_up}",
+                    f"{b}_{chain_low}",
                     f"{b}{chain_up}",
+                    f"{b}{chain_low}",
                 ]
             cands.append(b)
         return cands
@@ -140,69 +142,20 @@ class WrappedMyRepBioLIP2Tokenizer:
             return arr, None
         return None, None
 
-    def _resolve_pdb_path(self, pdb_id):
-        if not self.pdb_data_dir:
-            return None
-        base = os.path.abspath(os.path.expanduser(self.pdb_data_dir))
-        cand3 = os.path.join(base, "mmcif_files", "mmcif_files", f"{pdb_id}.cif")
-        cand1 = os.path.join(base, "mmcif_files", f"{pdb_id}.cif")
-        cand2 = os.path.join(base, f"{pdb_id}.cif")
-        for c in (cand3, cand1, cand2):
-            if os.path.exists(c):
-                return c
-        return cand1 if os.path.isdir(os.path.join(base, "mmcif_files")) else cand2
-
-    def _fallback_from_structure(self, pdb_id, chain_up):
-        if not self.fallback_to_structure:
-            return None, None
-        pdb_path = self._resolve_pdb_path(pdb_id)
-        if not pdb_path or not os.path.exists(pdb_path):
-            return None, None
-        try:
-            from .protein_chain import ProteinChain
-        except Exception:
-            return None, None
-        try:
-            pc = ProteinChain.from_cif(pdb_path, chain_id=chain_up or "detect")
-        except Exception:
-            return None, None
-        resid = np.asarray(pc.residue_index, dtype=int)
-        if resid.size == 0:
-            return None, None
-        arr = np.zeros((int(len(resid)), self.embed_dim), dtype=np.float32)
-        return arr, resid
-
     def get_last_debug_info(self):
         return dict(self._last_debug)
 
     @torch.no_grad()
-    def encode_structure(self, pdb_path, chain_id, use_sequence=False, fallback_residue_index=None):
+    def encode_structure(self, pdb_path, chain_id, use_sequence=False):
         pdb_id = os.path.basename(pdb_path).split(".")[0].lower()
         chain_up = (chain_id or "").strip().upper()
 
-        fallback_idx = None
-        if fallback_residue_index is not None:
-            try:
-                fallback_idx = np.asarray(fallback_residue_index).astype(int)
-            except Exception:
-                fallback_idx = None
-
         arr, idx = self._read_from_h5(pdb_id, chain_up)
-        used_fallback = False
-        if arr is None:
-            if fallback_idx is not None and fallback_idx.size > 0:
-                arr = np.zeros((int(fallback_idx.shape[0]), self.embed_dim), dtype=np.float32)
-                idx = fallback_idx
-                used_fallback = True
-            else:
-                arr, idx = self._fallback_from_structure(pdb_id, chain_up)
-                used_fallback = arr is not None
         if arr is None:
             if self.skip_on_missing:
                 raise MissingRepresentation(f"No H5 entry for {pdb_id}/{chain_up}")
             arr = np.zeros((1, self.embed_dim), dtype=np.float32)
             idx = None
-            used_fallback = True
 
         if arr.ndim == 1:
             arr = arr[None, :]
@@ -214,10 +167,7 @@ class WrappedMyRepBioLIP2Tokenizer:
                 idx = None
 
         try:
-            if used_fallback:
-                row_nonzero = np.ones((arr.shape[0],), dtype=bool)
-            else:
-                row_nonzero = ~np.all(arr == 0, axis=-1)
+            row_nonzero = ~np.all(arr == 0, axis=-1)
         except Exception:
             row_nonzero = np.ones((arr.shape[0],), dtype=bool)
         if idx is not None and idx.shape[0] == arr.shape[0]:
@@ -234,13 +184,6 @@ class WrappedMyRepBioLIP2Tokenizer:
 
         feats = torch.as_tensor(arr, dtype=torch.float32, device=self.device)
         L = int(feats.shape[0])
-        if (idx is None or idx.shape[0] != L):
-            if fallback_idx is not None and fallback_idx.shape[0] == L:
-                idx = fallback_idx
-        if (idx is None or idx.shape[0] != L) and self.fallback_to_structure:
-            _, idx2 = self._fallback_from_structure(pdb_id, chain_up)
-            if idx2 is not None and idx2.shape[0] == L:
-                idx = idx2
         if idx is None or idx.shape[0] != L:
             idx = np.arange(L, dtype=int)
 

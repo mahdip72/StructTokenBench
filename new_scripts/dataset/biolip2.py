@@ -69,6 +69,7 @@ class BioLIP2FunctionDataset(Dataset):
             f"{self.target_field}_{self.split}",
         )
         self.data = torch.load(raw_file, map_location="cpu", weights_only=False)
+        self._prefilter_missing_h5()
 
     def __len__(self):
         return len(self.data)
@@ -81,6 +82,23 @@ class BioLIP2FunctionDataset(Dataset):
             except Exception:
                 pass
         print(msg)
+
+    def _prefilter_missing_h5(self):
+        kept = []
+        skipped = 0
+        for item in self.data:
+            pdb_id = str(item.get("pdb_id", "")).lower()
+            chain_id = item.get("receptor_chain") or item.get("chain_id")
+            if not pdb_id or chain_id is None:
+                skipped += 1
+                continue
+            arr, _ = self.tokenizer._read_from_h5(pdb_id, str(chain_id).strip().upper())
+            if arr is None:
+                skipped += 1
+                continue
+            kept.append(item)
+        self.data = kept
+        self._log(f"[data] kept {len(kept)} / {len(kept) + skipped} samples with H5 embeddings")
 
     def __getitem__(self, idx):
         if self.cache and idx in self._cache:
