@@ -174,17 +174,17 @@ def parse_args():
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=1e-2)
+    p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
-    p.add_argument("--hidden-size", type=int, default=256)
+    p.add_argument("--hidden-size", type=int, default=512)
     p.add_argument("--num-layer", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.1)
-    p.add_argument("--d-model", type=int, default=256)
-    p.add_argument("--warmup-steps", type=int, default=200)
-    p.add_argument("--min-lr-ratio", type=float, default=0.1)
-    p.add_argument("--plateau-ratio", type=float, default=0.1)
+    p.add_argument("--d-model", type=int, default=None)
+    p.add_argument("--warmup-steps", type=int, default=50)
+    p.add_argument("--min-lr-ratio", type=float, default=0.01)
+    p.add_argument("--plateau-ratio", type=float, default=0.0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--tokenizer-device", default="cpu")
     p.add_argument("--progress", action="store_true", help="Show tqdm progress bars")
@@ -205,8 +205,6 @@ def main():
     tokenizer = WrappedMyRepBioLIP2Tokenizer(
         h5_path=args.h5,
         embeddings_dataset=args.embeddings_dataset,
-        pdb_data_dir=args.pdb_dir,
-        fallback_to_structure=True,
         device=str(args.tokenizer_device),
     )
 
