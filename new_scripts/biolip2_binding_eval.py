@@ -210,7 +210,7 @@ def main():
     model = nn.Linear(embed_dim, 1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
     total_steps = max(1, args.epochs * len(train_loader))
-    min_factor = 0.01  # final lr = lr * 1/100
+    min_factor = 0.1  # final lr = lr * 1/10
     def lr_lambda(step):
         frac = min(step / total_steps, 1.0)
         return 1.0 - frac * (1.0 - min_factor)
