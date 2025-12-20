@@ -163,7 +163,7 @@ def parse_args():
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=2)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--num-workers", type=int, default=8)
+    p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--tokenizer-device", default="cpu")
@@ -209,14 +209,59 @@ def main():
     embed_dim = sample_dim
     model = nn.Linear(embed_dim, 1).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    total_steps = max(1, args.epochs * len(train_loader))
+    min_factor = 0.01  # final lr = lr * 1/100
+    def lr_lambda(step):
+        frac = min(step / total_steps, 1.0)
+        return 1.0 - frac * (1.0 - min_factor)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
     logger.info("[train] start")
     best_state = None
     best_val = float("-inf")
+    global_step = 0
     for epoch in range(args.epochs):
-        loss = train_one_epoch(model, train_loader, optimizer, device, show_progress=args.progress)
+        model.train()
+        total_loss = 0.0
+        steps = 0
+        for batch in _iter_with_progress(train_loader, args.progress, desc="train"):
+            if batch is None:
+                continue
+            feats = batch["token_ids"].to(device)
+            targets = batch["labels"].to(device)
+            mask = targets != -100
+            if mask.sum() == 0:
+                continue
+            logits = model(feats).squeeze(-1)
+            logits = logits[mask]
+            targets = targets[mask]
+            pos = targets.sum()
+            neg = targets.numel() - pos
+            if pos > 0 and neg > 0:
+                pos_weight = targets.numel() / pos * 0.5
+                neg_weight = targets.numel() / neg * 0.5
+                weights = torch.full_like(targets, neg_weight)
+                weights[targets >= 0.5] = pos_weight
+                loss = F.binary_cross_entropy_with_logits(logits, targets, weight=weights)
+            else:
+                loss = F.binary_cross_entropy_with_logits(logits, targets)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            total_loss += float(loss.item())
+            steps += 1
+            global_step += 1
+        loss = total_loss / max(1, steps)
         val_auroc = eval_auroc(model, val_loader, device, show_progress=args.progress, desc="val")
-        logger.info(f"[train] epoch={epoch+1} loss={loss:.4f} val_auroc={val_auroc*100:.2f}")
+        fold_auroc = eval_auroc(model, fold_loader, device, show_progress=args.progress, desc="fold_test")
+        sfam_auroc = eval_auroc(model, sfam_loader, device, show_progress=args.progress, desc="superfamily_test")
+        logger.info(
+            f"[train] epoch={epoch+1} loss={loss:.4f} "
+            f"val_auroc={val_auroc*100:.2f} "
+            f"fold_test_auroc={fold_auroc*100:.2f} "
+            f"superfamily_test_auroc={sfam_auroc*100:.2f}"
+        )
         if val_auroc > best_val:
             best_val = val_auroc
             best_state = copy.deepcopy(model.state_dict())
