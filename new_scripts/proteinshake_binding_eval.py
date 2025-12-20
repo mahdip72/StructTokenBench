@@ -187,11 +187,10 @@ def parse_args():
         help="Directory that contains mmcif_files/ (or mmCIF files directly)",
     )
     p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--max-steps", type=int, default=60)
     p.add_argument("--limit-train-batches", type=float, default=0.2)
     p.add_argument("--limit-val-batches", type=float, default=1.0)
-    p.add_argument("--batch-size", type=int, default=8)
-    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--batch-size", type=int, default=1024)
+    p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
@@ -259,11 +258,7 @@ def main():
     if train_batches <= 0:
         raise RuntimeError("limit-train-batches resulted in zero batches.")
 
-    if args.max_steps is not None and args.max_steps > 0:
-        total_steps = int(args.max_steps)
-    else:
-        total_steps = int(args.epochs * train_batches)
-    total_steps = max(1, total_steps)
+    total_steps = max(1, int(args.epochs * train_batches))
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
@@ -311,8 +306,6 @@ def main():
             total_loss += float(loss.item())
             steps += 1
             global_step += 1
-            if args.max_steps is not None and global_step >= args.max_steps:
-                break
 
         loss = total_loss / max(1, steps)
         val_auroc = eval_auroc(
@@ -330,8 +323,6 @@ def main():
             best_val = val_auroc
             best_state = copy.deepcopy(model.state_dict())
 
-        if args.max_steps is not None and global_step >= args.max_steps:
-            break
 
     logger.info("[train] finished")
 
