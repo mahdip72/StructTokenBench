@@ -84,20 +84,6 @@ def get_cosine_schedule_with_warmup(
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
 
 
-def _resolve_limit(num_batches, limit):
-    if limit is None:
-        return num_batches
-    try:
-        limit = float(limit)
-    except Exception:
-        return num_batches
-    if limit <= 0:
-        return 0
-    if limit <= 1.0:
-        return max(1, int(math.ceil(limit * num_batches)))
-    return max(1, min(num_batches, int(limit)))
-
-
 def build_dataset(split: str, args, tokenizer, logger):
     logger.info(f"[data] init dataset split={split}")
     ds = ProteinShakeBindingSiteDataset(
@@ -187,8 +173,6 @@ def parse_args():
         help="Directory that contains mmcif_files/ (or mmCIF files directly)",
     )
     p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--limit-train-batches", type=float, default=0.2)
-    p.add_argument("--limit-val-batches", type=float, default=1.0)
     p.add_argument("--batch-size", type=int, default=1024)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--num-workers", type=int, default=2)
@@ -252,13 +236,10 @@ def main():
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01, betas=(0.9, 0.98))
 
-    train_batches = _resolve_limit(len(train_loader), args.limit_train_batches)
-    val_batches = _resolve_limit(len(val_loader), args.limit_val_batches)
-    test_batches = _resolve_limit(len(test_loader), args.limit_val_batches)
-    if train_batches <= 0:
-        raise RuntimeError("limit-train-batches resulted in zero batches.")
+    val_batches = None
+    test_batches = None
 
-    total_steps = max(1, int(args.epochs * train_batches))
+    total_steps = max(1, int(args.epochs * len(train_loader)))
 
     scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
@@ -277,8 +258,6 @@ def main():
         total_loss = 0.0
         steps = 0
         for step, batch in enumerate(_iter_with_progress(train_loader, args.progress, desc="train")):
-            if step >= train_batches:
-                break
             if batch is None:
                 continue
             feats = batch["token_ids"].to(device)
