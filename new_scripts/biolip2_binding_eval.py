@@ -90,7 +90,7 @@ def build_dataset(split: str, args, tokenizer, logger):
         data_path=args.data_root,
         split=split,
         target_field="binding_label",
-        pdb_data_dir=args.pdb_dir,
+        pdb_data_dir=None,
         tokenizer=tokenizer,
         logger=logger,
         cache=True,
@@ -197,11 +197,6 @@ def parse_args():
         "--data-root",
         default="/mnt/hdd8/farzaneh/projects/PST/struct_token_bench_release_data/data/functional/local",
         help="Root containing biolip2/processed_structured_* files",
-    )
-    p.add_argument(
-        "--pdb-dir",
-        default="/mnt/hdd8/farzaneh/projects/PST/mmcif_files/pdb_data",
-        help="Directory that contains mmcif_files/ (or mmCIF files directly)",
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=2)

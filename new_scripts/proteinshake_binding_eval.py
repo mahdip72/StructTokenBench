@@ -90,7 +90,7 @@ def build_dataset(split: str, args, tokenizer, logger):
         data_path=args.data_root,
         split=split,
         target_field="binding_site",
-        pdb_data_dir=args.pdb_dir,
+        pdb_data_dir=None,
         tokenizer=tokenizer,
         logger=logger,
         cache=True,
@@ -166,11 +166,6 @@ def parse_args():
         "--data-root",
         default="/home/fe5vb/project/PST/struct_token_bench_release_data/data/functional/local/",
         help="Root containing proteinshake_bindingsite/processed_structured_* files",
-    )
-    p.add_argument(
-        "--pdb-dir",
-        default="/home/fe5vb/project/PST/pdb_data/",
-        help="Directory that contains mmcif_files/ (or mmCIF files directly)",
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=1024)
