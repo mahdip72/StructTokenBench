@@ -188,20 +188,36 @@ class RemoteHomologyDataset(Dataset):
             return unique[0]
         return chain_value
 
-    def _get_selected_indices(self, residue_index, residue_range):
-        """Logic from StructTokenBench/src/dataset/base.py"""
+    def _get_selected_indices_by_length(self, length, residue_range):
+        """Select indices by position when residue_range is positional."""
         if residue_range == [""] or residue_range is None:
-            return np.arange(len(residue_index))
-        
-        # simplified residue range logic
-        mask = np.zeros(len(residue_index), dtype=bool)
+            return np.arange(length)
+
+        # decide whether residue_range is 0-based or 1-based
+        starts = []
         for r in residue_range:
-            if "-" not in r: continue
+            if "-" not in r:
+                continue
+            try:
+                start, _ = map(int, r.split("-"))
+                starts.append(start)
+            except Exception:
+                continue
+        offset = 0 if (len(starts) > 0 and min(starts) == 0) else 1
+
+        mask = np.zeros(length, dtype=bool)
+        for r in residue_range:
+            if "-" not in r:
+                continue
             try:
                 start, end = map(int, r.split("-"))
-                mask |= (residue_index >= start) & (residue_index <= end)
-            except:
+            except Exception:
                 continue
+            start_idx = max(0, start - offset)
+            end_idx = min(length - 1, end - offset)
+            if end_idx < start_idx:
+                continue
+            mask[start_idx : end_idx + 1] = True
         return np.where(mask)[0]
 
     def __getitem__(self, idx):
@@ -213,25 +229,14 @@ class RemoteHomologyDataset(Dataset):
         chain_id = self._pick_chain_id(item.get("chain_id")) or "A"
         residue_range = item.get("residue_range", [""])
 
-        arr, idx = self.tokenizer._read_from_h5(pdb_id, str(chain_id).strip().upper())
+        arr, _ = self.tokenizer._read_from_h5(pdb_id, str(chain_id).strip().upper())
         if arr is None:
             return None
         if arr.ndim == 1:
             arr = arr[None, :]
         token_ids = torch.as_tensor(arr, dtype=torch.float32)
-        if idx is not None:
-            try:
-                idx = np.asarray(idx).astype(int)
-            except Exception:
-                idx = None
-        if idx is None or idx.shape[0] != token_ids.shape[0]:
-            token_res_idx = np.arange(int(token_ids.shape[0]), dtype=int)
-        else:
-            token_res_idx = idx
-
-        # Crop to domain
-        token_res_idx = np.asarray(token_res_idx)
-        selected_indices = self._get_selected_indices(token_res_idx, residue_range)
+        # Crop to domain by positional residue ranges
+        selected_indices = self._get_selected_indices_by_length(int(token_ids.shape[0]), residue_range)
         
         if len(selected_indices) == 0:
             return None
