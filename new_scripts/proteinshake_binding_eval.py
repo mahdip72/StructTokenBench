@@ -167,10 +167,10 @@ def parse_args():
         default="/home/fe5vb/project/PST/struct_token_bench_release_data/data/functional/local/",
         help="Root containing proteinshake_bindingsite/processed_structured_* files",
     )
-    p.add_argument("--epochs", type=int, default=5)
-    p.add_argument("--batch-size", type=int, default=1024)
+    p.add_argument("--epochs", type=int, default=128)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-2)
-    p.add_argument("--num-workers", type=int, default=2)
+    p.add_argument("--num-workers", type=int, default=12)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
     p.add_argument("--hidden-size", type=int, default=512)
