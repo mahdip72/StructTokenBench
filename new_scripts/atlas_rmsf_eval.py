@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torchmetrics.regression import MeanSquaredError, SpearmanCorrCoef
+from torchmetrics.regression import SpearmanCorrCoef
 
 from dataset.atlas import AtlasDataset
 from dataset.tokenizer_biolip2 import WrappedMyRepBioLIP2Tokenizer
@@ -125,10 +125,9 @@ def _iter_with_progress(loader, enabled, desc):
 
 
 @torch.no_grad()
-def eval_metrics(model, loader, device, show_progress=False, desc="eval"):
+def eval_spearman(model, loader, device, show_progress=False, desc="eval"):
     model.eval()
     spearman = SpearmanCorrCoef().to(device)
-    rmse = MeanSquaredError(squared=False).to(device)
     total = 0
     for batch in _iter_with_progress(loader, show_progress, desc=desc):
         if batch is None:
@@ -143,13 +142,9 @@ def eval_metrics(model, loader, device, show_progress=False, desc="eval"):
         labs = targets[mask]
         total += int(labs.numel())
         spearman.update(preds, labs)
-        rmse.update(preds, labs)
     if total < 2:
-        return float("nan"), float("nan")
-    return (
-        float(spearman.compute().detach().cpu().item()),
-        float(rmse.compute().detach().cpu().item()),
-    )
+        return float("nan")
+    return float(spearman.compute().detach().cpu().item())
 
 
 def parse_args():
@@ -267,18 +262,16 @@ def main():
             total_loss += float(loss.item())
             steps += 1
         loss = total_loss / max(1, steps)
-        val_spear, val_rmse = eval_metrics(model, val_loader, device, show_progress=args.progress, desc="val")
-        fold_spear, fold_rmse = eval_metrics(
-            model, fold_loader, device, show_progress=args.progress, desc="fold_test"
-        )
-        sfam_spear, sfam_rmse = eval_metrics(
+        val_spear = eval_spearman(model, val_loader, device, show_progress=args.progress, desc="val")
+        fold_spear = eval_spearman(model, fold_loader, device, show_progress=args.progress, desc="fold_test")
+        sfam_spear = eval_spearman(
             model, sfam_loader, device, show_progress=args.progress, desc="superfamily_test"
         )
         logger.info(
             f"[train] epoch={epoch+1} loss={loss:.4f} "
-            f"val_spearman={val_spear:.4f} val_rmse={val_rmse:.4f} "
-            f"fold_test_spearman={fold_spear:.4f} fold_test_rmse={fold_rmse:.4f} "
-            f"superfamily_test_spearman={sfam_spear:.4f} superfamily_test_rmse={sfam_rmse:.4f}"
+            f"val_spearman={val_spear:.4f} "
+            f"fold_test_spearman={fold_spear:.4f} "
+            f"superfamily_test_spearman={sfam_spear:.4f}"
         )
         if val_spear > best_val:
             best_val = val_spear
@@ -289,12 +282,10 @@ def main():
         model.load_state_dict(best_state)
         logger.info(f"[train] loaded best val checkpoint (val_spearman={best_val:.4f})")
 
-    fold_spear, fold_rmse = eval_metrics(model, fold_loader, device, show_progress=args.progress, desc="fold_test")
-    sfam_spear, sfam_rmse = eval_metrics(
-        model, sfam_loader, device, show_progress=args.progress, desc="superfamily_test"
-    )
-    logger.info(f"[final] fold_test spearman={fold_spear:.4f} rmse={fold_rmse:.4f}")
-    logger.info(f"[final] superfamily_test spearman={sfam_spear:.4f} rmse={sfam_rmse:.4f}")
+    fold_spear = eval_spearman(model, fold_loader, device, show_progress=args.progress, desc="fold_test")
+    sfam_spear = eval_spearman(model, sfam_loader, device, show_progress=args.progress, desc="superfamily_test")
+    logger.info(f"[final] fold_test spearman={fold_spear:.4f}")
+    logger.info(f"[final] superfamily_test spearman={sfam_spear:.4f}")
 
 
 if __name__ == "__main__":
