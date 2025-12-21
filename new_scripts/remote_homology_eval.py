@@ -269,10 +269,15 @@ def main():
             steps += 1
 
         avg_loss = total_loss / max(1, steps)
+        train_f1 = eval_macro_f1(
+            model, train_loader, device, num_classes=num_classes, show_progress=args.progress, desc="train_eval"
+        )
         val_f1 = eval_macro_f1(
             model, val_loader, device, num_classes=num_classes, show_progress=args.progress, desc="val"
         )
-        logger.info(f"[train] epoch={epoch+1} loss={avg_loss:.4f} val_f1={val_f1*100:.2f}")
+        logger.info(
+            f"[train] epoch={epoch+1} loss={avg_loss:.4f} train_f1={train_f1*100:.2f} val_f1={val_f1*100:.2f}"
+        )
 
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
