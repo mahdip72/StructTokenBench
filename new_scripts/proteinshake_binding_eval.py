@@ -174,7 +174,7 @@ def parse_args():
     )
     p.add_argument("--epochs", type=int, default=5)
     p.add_argument("--batch-size", type=int, default=1024)
-    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
