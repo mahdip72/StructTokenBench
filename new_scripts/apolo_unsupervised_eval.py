@@ -26,11 +26,24 @@ def _iter_with_progress(loader, enabled, desc):
         return loader
 
 
-def compute_alignment_score(feats1: torch.Tensor, feats2: torch.Tensor) -> float:
-    feats1 = F.normalize(feats1, p=2, dim=-1)
-    feats2 = F.normalize(feats2, p=2, dim=-1)
+def compute_alignment_score(
+    feats1: torch.Tensor,
+    feats2: torch.Tensor,
+    gap_penalty: int,
+    terminal_penalty: bool,
+    local_align: bool,
+    sim_scale: float,
+    sim_clip: float | None,
+    score_norm: str,
+    l2_normalize: bool,
+) -> float:
+    if l2_normalize:
+        feats1 = F.normalize(feats1, p=2, dim=-1)
+        feats2 = F.normalize(feats2, p=2, dim=-1)
     sim = torch.matmul(feats1, feats2.T)  # [L1, L2]
-    sim = (sim.detach().cpu().numpy() * 100).astype(np.int32)
+    if sim_clip is not None:
+        sim = torch.clamp(sim, -sim_clip, sim_clip)
+    sim = (sim.detach().cpu().numpy() * sim_scale).astype(np.int32)
     L1, L2 = sim.shape
     sim_score = np.zeros((L1 + L2, L1 + L2), dtype=np.int32)
     sim_score[:L1, L1:] = sim
@@ -38,12 +51,34 @@ def compute_alignment_score(feats1: torch.Tensor, feats2: torch.Tensor) -> float
     substitution_matrix = SubstitutionMatrix(alphabet, alphabet, sim_score)
     seq1 = GeneralSequence(alphabet, np.arange(L1))
     seq2 = GeneralSequence(alphabet, np.arange(L2) + L1)
-    align_score = align_optimal(seq1, seq2, substitution_matrix)[0].score
-    return float(align_score)
+    align_score = align_optimal(
+        seq1,
+        seq2,
+        substitution_matrix,
+        gap_penalty=gap_penalty,
+        terminal_penalty=terminal_penalty,
+        local=local_align,
+    )[0].score
+    score = float(align_score)
+    if score_norm == "min":
+        denom = float(min(L1, L2))
+    elif score_norm == "max":
+        denom = float(max(L1, L2))
+    elif score_norm == "mean":
+        denom = float((L1 + L2) / 2.0)
+    elif score_norm == "sum":
+        denom = float(L1 + L2)
+    elif score_norm == "geo":
+        denom = float(math.sqrt(L1 * L2))
+    else:
+        denom = 1.0
+    if denom > 0:
+        score = score / denom
+    return score
 
 
 @torch.no_grad()
-def eval_unsupervised(model_device, loader, show_progress=False, desc="eval"):
+def eval_unsupervised(model_device, loader, align_cfg, show_progress=False, desc="eval"):
     preds = []
     targets = []
     for batch in _iter_with_progress(loader, show_progress, desc=desc):
@@ -57,7 +92,17 @@ def eval_unsupervised(model_device, loader, show_progress=False, desc="eval"):
             feats2 = feats2.to(model_device)
             if feats1.numel() == 0 or feats2.numel() == 0:
                 continue
-            score = compute_alignment_score(feats1, feats2)
+            score = compute_alignment_score(
+                feats1,
+                feats2,
+                gap_penalty=align_cfg["gap_penalty"],
+                terminal_penalty=align_cfg["terminal_penalty"],
+                local_align=align_cfg["local_align"],
+                sim_scale=align_cfg["sim_scale"],
+                sim_clip=align_cfg["sim_clip"],
+                score_norm=align_cfg["score_norm"],
+                l2_normalize=align_cfg["l2_normalize"],
+            )
             preds.append(score)
             targets.append(float(label))
 
@@ -96,6 +141,18 @@ def parse_args():
         choices=["tm_score", "negrmsd_score"],
         help="Target field to compare against",
     )
+    p.add_argument("--gap-penalty", type=int, default=-10)
+    p.add_argument("--local", action="store_true", help="Use local alignment instead of global")
+    p.add_argument("--no-terminal-penalty", action="store_true", help="Disable terminal gap penalties")
+    p.add_argument("--sim-scale", type=float, default=100.0)
+    p.add_argument("--sim-clip", type=float, default=0.0, help="Clip cosine similarity before scaling (0 disables)")
+    p.add_argument(
+        "--score-norm",
+        default="none",
+        choices=["none", "min", "max", "mean", "sum", "geo"],
+        help="Normalize alignment score by sequence lengths",
+    )
+    p.add_argument("--no-l2-normalize", action="store_true", help="Disable L2 normalization")
     p.add_argument("--batch-size", type=int, default=1)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
@@ -120,6 +177,16 @@ def main():
         embeddings_dataset=args.embeddings_dataset,
         device=str(args.tokenizer_device),
     )
+
+    align_cfg = {
+        "gap_penalty": args.gap_penalty,
+        "terminal_penalty": not args.no_terminal_penalty,
+        "local_align": args.local,
+        "sim_scale": float(args.sim_scale),
+        "sim_clip": float(args.sim_clip) if args.sim_clip and args.sim_clip > 0 else None,
+        "score_norm": args.score_norm,
+        "l2_normalize": not args.no_l2_normalize,
+    }
 
     splits = ["apo_holo_test", "fold_switching_test"]
     results = {}
@@ -146,7 +213,9 @@ def main():
         )
 
         logger.info("[eval] start")
-        spearman, pearson, n = eval_unsupervised(device, loader, show_progress=args.progress, desc=split)
+        spearman, pearson, n = eval_unsupervised(
+            device, loader, align_cfg, show_progress=args.progress, desc=split
+        )
         results[split] = (spearman, pearson, n)
         logger.info(f"[eval] split={split} n={n} spearman={spearman:.4f} pearson={pearson:.4f}")
 
