@@ -170,9 +170,9 @@ def parse_args():
         help="Root containing atlas/processed_structured_* files",
     )
     p.add_argument("--epochs", type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-2)
-    p.add_argument("--num-workers", type=int, default=16)
+    p.add_argument("--num-workers", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
     p.add_argument("--hidden-size", type=int, default=512)
