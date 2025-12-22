@@ -165,14 +165,14 @@ def parse_args():
         default="/mnt/hdd8/farzaneh/projects/PST/struct_token_bench_release_data/data/functional/local",
         help="Root containing proteinglue_epitoperegion/processed_structured_* files",
     )
-    p.add_argument("--epochs", type=int, default=128)
-    p.add_argument("--batch-size", type=int, default=256)
+    p.add_argument("--epochs", type=int, default=512)
+    p.add_argument("--batch-size", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-2)
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
-    p.add_argument("--hidden-size", type=int, default=1024)
-    p.add_argument("--num-layer", type=int, default=4)
+    p.add_argument("--hidden-size", type=int, default=512)
+    p.add_argument("--num-layer", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--d-model", type=int, default=None)
     p.add_argument("--warmup-steps", type=int, default=50)
