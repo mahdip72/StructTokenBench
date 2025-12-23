@@ -173,7 +173,7 @@ def parse_args():
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--filter-length", type=int, default=600)
     p.add_argument("--hidden-size", type=int, default=512)
-    p.add_argument("--num-layer", type=int, default=2)
+    p.add_argument("--num-layer", type=int, default=1)
     p.add_argument("--dropout", type=float, default=0.1)
     p.add_argument("--d-model", type=int, default=None)
     p.add_argument("--warmup-steps", type=int, default=50)
